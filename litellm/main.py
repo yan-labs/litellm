@@ -1,3 +1,9 @@
+"""LiteLLM public model entry points and internal health-check dispatch.
+
+Managed Kie/Wokey media health checks mark internal context so provider probes
+read free metadata rather than creating billable generated content.
+"""
+
 # +-----------------------------------------------+
 # |                                               |
 # |           Give Feedback / Get Help            |
@@ -40,6 +46,7 @@ from typing import (
     get_args,
 )
 
+from litellm._logging import _redact_string
 from litellm._uuid import uuid
 
 if TYPE_CHECKING:
@@ -946,7 +953,7 @@ def responses_api_bridge_check(
                 model=model, custom_llm_provider=custom_llm_provider
             ),
         )
-        if model_info.get("mode") is None and model.startswith("responses/"):
+        if model.startswith("responses/"):
             model = model.replace("responses/", "")
             mode = "responses"
             model_info["mode"] = mode
@@ -6567,7 +6574,9 @@ def transcription(
             api_base=api_base,
             api_key=api_key,
             provider_config=provider_config,
-            litellm_params=litellm_params_dict,
+            # The OpenAI-compatible transformer needs the resolved base to keep
+            # OpenRouter STT on its portable JSON response contract.
+            litellm_params={**litellm_params_dict, "api_base": api_base},
             shared_session=shared_session,
         )
     elif provider_config is not None:
@@ -7217,7 +7226,18 @@ async def ahealth_check(
         )
 
         if mode in mode_handlers:
-            _response = await mode_handlers[mode]()
+            if custom_llm_provider in ("kie", "wokey") and mode in (
+                "image_generation", "video_generation"
+            ):
+                from litellm.llms.kie.health_check import health_check_context
+
+                token = health_check_context.set(True)
+                try:
+                    _response = await mode_handlers[mode]()
+                finally:
+                    health_check_context.reset(token)
+            else:
+                _response = await mode_handlers[mode]()
             # Only process headers for chat mode
             _response_headers: dict = (
                 getattr(_response, "_hidden_params", {}).get("headers", {}) or {}
@@ -7228,7 +7248,7 @@ async def ahealth_check(
                 f"Mode {mode} not supported. See modes here: https://docs.litellm.ai/docs/proxy/health"
             )
     except Exception as e:
-        stack_trace = traceback.format_exc()
+        stack_trace = _redact_string(traceback.format_exc())
         if isinstance(stack_trace, str):
             stack_trace = stack_trace[:1000]
 

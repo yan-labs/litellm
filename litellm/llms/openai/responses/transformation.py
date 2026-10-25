@@ -1,3 +1,11 @@
+"""OpenAI Responses transport conversion shared by native and adapted requests.
+
+The HTTP handlers call this layer after routing; endpoint-specific compatibility
+belongs here so chat/messages/native entry points keep the same upstream contract.
+"""
+import json
+import time
+
 from typing import TYPE_CHECKING, Any, Dict, Optional, Union, cast, get_type_hints
 
 import httpx
@@ -71,15 +79,40 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
         litellm_params: GenericLiteLLMParams,
         headers: dict,
     ) -> Dict:
-        """No transform applied since inputs are in OpenAI spec already"""
+        """Build the upstream body for both sync/async Responses HTTP handlers.
+
+        Wokey accepts attribution in metadata but rejects the deprecated user
+        parameter. Keep that endpoint-specific mapping here, after model routing,
+        to preserve tools/reasoning and avoid changing OpenAI or Kie requests.
+        """
 
         input = self._validate_input_param(input)
         final_request_params = dict(
             ResponsesAPIRequestParams(
-                model=model, input=input, **response_api_optional_request_params
+                model=model.removeprefix("responses/"),
+                input=input,
+                **response_api_optional_request_params,
             )
         )
 
+        api_base = (
+            litellm_params.get("api_base")
+            if isinstance(litellm_params, dict)
+            else litellm_params.api_base
+        )
+        if (
+            api_base
+            and httpx.URL(api_base).host == "api.wokey.ai"
+            and "user" in final_request_params
+        ):
+            # This is attribution only, not a safety-identifier substitute. Explicit
+            # metadata takes precedence; copy it so callers' dictionaries stay intact.
+            metadata = dict(final_request_params.get("metadata") or {})
+            metadata.setdefault("user_id", final_request_params.pop("user"))
+            final_request_params["metadata"] = metadata
+
+        # Some OpenAI-compatible providers default to SSE when stream is omitted.
+        final_request_params["stream"] = bool(final_request_params.get("stream", False))
         return final_request_params
 
     def _validate_input_param(
@@ -167,10 +200,12 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
                 original_response=raw_response.text,
                 additional_args={"complete_input_dict": {}},
             )
-            raw_response_json = raw_response.json()
+            raw_response_json = self._get_non_streaming_response_json(raw_response)
             raw_response_json["created_at"] = _safe_convert_created_field(
-                raw_response_json["created_at"]
+                raw_response_json.get("created_at", int(time.time()))
             )
+        except OpenAIError:
+            raise
         except Exception:
             raise OpenAIError(
                 message=raw_response.text, status_code=raw_response.status_code
@@ -189,6 +224,47 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
         response._hidden_params["additional_headers"] = processed_headers
         response._hidden_params["headers"] = raw_response_headers
         return response
+
+    @staticmethod
+    def _get_non_streaming_response_json(raw_response: httpx.Response) -> dict:
+        """Recover a completed response when a provider unexpectedly sends SSE."""
+        text = raw_response.text
+        if "text/event-stream" not in raw_response.headers.get(
+            "content-type", ""
+        ).lower() and not text.lstrip().startswith("event:"):
+            return raw_response.json()
+
+        events = []
+        for block in text.replace("\r\n", "\n").replace("\r", "\n").split("\n\n"):
+            event_name = ""
+            data_lines = []
+            for line in block.splitlines():
+                if line.startswith("event:"):
+                    event_name = line[6:].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[5:].lstrip(" "))
+            data = "\n".join(data_lines)
+            payload = None
+            if data and data != "[DONE]":
+                try:
+                    payload = json.loads(data)
+                except ValueError:
+                    pass
+            if not event_name and isinstance(payload, dict):
+                event_name = payload.get("type", "")
+            if event_name:
+                events.append(event_name)
+            if (
+                event_name == "response.completed"
+                and isinstance(payload, dict)
+                and isinstance(payload.get("response"), dict)
+            ):
+                return payload["response"]
+        raise OpenAIError(
+            message="Non-streaming Responses request received SSE without a completed "
+            "response; received events: " + (", ".join(events) or "(none)"),
+            status_code=raw_response.status_code,
+        )
 
     def validate_environment(
         self, headers: dict, model: str, litellm_params: Optional[GenericLiteLLMParams]
@@ -334,14 +410,15 @@ class OpenAIResponsesAPIConfig(BaseResponsesAPIConfig):
         if model is not None:
             try:
                 if (
-                    litellm.utils.supports_native_streaming(
-                        model=model,
+                    litellm.utils.get_model_info(
+                        model=model.removeprefix("responses/"),
                         custom_llm_provider=custom_llm_provider,
-                    )
+                    ).get("supports_native_streaming", True)
                     is False
                 ):
                     return True
             except Exception as e:
+                # An unregistered model has unknown capability, not a streaming opt-out.
                 verbose_logger.debug(
                     f"Error getting model info in OpenAIResponsesAPIConfig: {e}"
                 )

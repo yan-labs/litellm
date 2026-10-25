@@ -7,7 +7,9 @@ import pytest
 sys.path.insert(
     0, os.path.abspath("../../../..")
 )  # Adds the parent directory to the system path
+import litellm
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+from litellm.llms.minimax.messages.transformation import MinimaxMessagesConfig
 from litellm.types.router import GenericLiteLLMParams
 
 
@@ -288,3 +290,102 @@ async def test_async_anthropic_messages_handler_header_priority():
         assert captured_headers["X-Forwarded-Only"] == "keep"
         assert captured_headers["X-Extra-Only"] == "also-keep"
         assert captured_headers["X-Provider-Only"] == "keep-this-too"
+
+
+def test_filter_unsupported_minimax_anthropic_messages_params_drops_minimax_output_config():
+    handler = BaseLLMHTTPHandler()
+    provider_config = MinimaxMessagesConfig()
+
+    filtered_params = handler._filter_unsupported_minimax_anthropic_messages_params(
+        model="MiniMax-M2.7",
+        anthropic_messages_provider_config=provider_config,
+        anthropic_messages_optional_request_params={
+            "max_tokens": 1024,
+            "thinking": {"type": "enabled", "budget_tokens": 256},
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+                }
+            },
+        },
+        custom_llm_provider="minimax",
+        api_base=None,
+        litellm_params=GenericLiteLLMParams(drop_params=True),
+    )
+
+    assert "output_config" not in filtered_params
+    assert filtered_params["max_tokens"] == 1024
+    assert filtered_params["thinking"]["type"] == "enabled"
+
+
+def test_filter_unsupported_minimax_anthropic_messages_params_raises_without_drop_params():
+    handler = BaseLLMHTTPHandler()
+    provider_config = MinimaxMessagesConfig()
+
+    with pytest.raises(litellm.UnsupportedParamsError, match="output_config"):
+        handler._filter_unsupported_minimax_anthropic_messages_params(
+            model="MiniMax-M2.7",
+            anthropic_messages_provider_config=provider_config,
+            anthropic_messages_optional_request_params={
+                "max_tokens": 1024,
+                "output_config": {
+                    "format": {
+                        "type": "json_schema",
+                        "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+                    }
+                },
+            },
+            custom_llm_provider="minimax",
+            api_base=None,
+            litellm_params=GenericLiteLLMParams(),
+        )
+
+
+def test_filter_unsupported_minimax_anthropic_messages_params_noops_for_non_minimax():
+    handler = BaseLLMHTTPHandler()
+    provider_config = MinimaxMessagesConfig()
+    params = {
+        "max_tokens": 1024,
+        "output_config": {
+            "format": {
+                "type": "json_schema",
+                "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+            }
+        },
+    }
+
+    filtered_params = handler._filter_unsupported_minimax_anthropic_messages_params(
+        model="claude-sonnet-4-5",
+        anthropic_messages_provider_config=provider_config,
+        anthropic_messages_optional_request_params=params,
+        custom_llm_provider="anthropic",
+        api_base=None,
+        litellm_params=GenericLiteLLMParams(drop_params=True),
+    )
+
+    assert filtered_params == params
+
+
+def test_filter_unsupported_minimax_anthropic_messages_params_drops_when_api_base_is_minimax():
+    handler = BaseLLMHTTPHandler()
+    provider_config = MinimaxMessagesConfig()
+
+    filtered_params = handler._filter_unsupported_minimax_anthropic_messages_params(
+        model="MiniMax-M2.7",
+        anthropic_messages_provider_config=provider_config,
+        anthropic_messages_optional_request_params={
+            "max_tokens": 1024,
+            "output_config": {
+                "format": {
+                    "type": "json_schema",
+                    "schema": {"type": "object", "properties": {"title": {"type": "string"}}},
+                }
+            },
+        },
+        custom_llm_provider="anthropic",
+        api_base="https://api.minimax.io/anthropic",
+        litellm_params=GenericLiteLLMParams(drop_params=True),
+    )
+
+    assert "output_config" not in filtered_params

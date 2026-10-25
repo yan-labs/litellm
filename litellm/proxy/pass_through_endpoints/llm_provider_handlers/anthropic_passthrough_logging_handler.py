@@ -1,4 +1,12 @@
+"""Normalize Anthropic pass-through responses for LiteLLM callbacks and spend.
+
+This handler sits after the proxy Router and converts native Anthropic
+responses into the shared logging payload consumed by spend, audit, and
+callback integrations.
+"""
+
 import json
+import math
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, List, Optional, Sequence, Union, cast
 
@@ -29,6 +37,120 @@ else:
 
 
 class AnthropicPassthroughLoggingHandler:
+    @staticmethod
+    def _is_nonnegative_finite_number(value: Any) -> bool:
+        """Accept only finite, non-boolean numbers used in trusted cost math."""
+        return (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(float(value))
+            and value >= 0
+        )
+
+    @staticmethod
+    def _is_unmapped_model_error(error: Exception) -> bool:
+        """Identify the calculator failure that trusted Router pricing can repair."""
+        message = str(error).lower()
+        return "model isn't mapped yet" in message or "model is not mapped" in message
+
+    @staticmethod
+    def _get_router_bound_response_cost(
+        litellm_model_response: Union[ModelResponse, TextCompletionResponse],
+        logging_obj: LiteLLMLoggingObj,
+    ) -> Optional[float]:
+        """Price usage from the Router's trusted request-local deployment.
+
+        DB-backed deployments may be selected in a worker where their UUID is
+        absent from the process-global model registry. The Router binding is
+        the authoritative server-side price source, so using it here preserves
+        exact spend without accepting any price supplied by request metadata.
+        """
+        model_info = logging_obj.get_bound_router_model_info()
+        if model_info is None:
+            return None
+
+        input_price = model_info.get("input_cost_per_token")
+        output_price = model_info.get("output_cost_per_token")
+        if not AnthropicPassthroughLoggingHandler._is_nonnegative_finite_number(
+            input_price
+        ) or not AnthropicPassthroughLoggingHandler._is_nonnegative_finite_number(
+            output_price
+        ):
+            return None
+
+        usage = getattr(litellm_model_response, "usage", None)
+        if usage is None:
+            return None
+        if isinstance(usage, dict):
+            usage_data = usage
+        elif hasattr(usage, "model_dump"):
+            usage_data = usage.model_dump()
+        else:
+            usage_data = {
+                key: getattr(usage, key, 0)
+                for key in (
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "cache_read_input_tokens",
+                    "cache_creation_input_tokens",
+                )
+            }
+
+        prompt_details = usage_data.get("prompt_tokens_details") or {}
+        cache_read_tokens = usage_data.get("cache_read_input_tokens")
+        if cache_read_tokens is None:
+            cache_read_tokens = prompt_details.get("cached_tokens", 0)
+        cache_creation_tokens = usage_data.get("cache_creation_input_tokens")
+        if cache_creation_tokens is None:
+            cache_creation_tokens = prompt_details.get("cache_creation_tokens", 0)
+        prompt_tokens = usage_data.get("prompt_tokens", 0)
+        if prompt_tokens is None:
+            prompt_tokens = 0
+        completion_tokens = usage_data.get("completion_tokens", 0)
+        if completion_tokens is None:
+            completion_tokens = 0
+        text_tokens = prompt_details.get("text_tokens")
+        raw_tokens = (
+            prompt_tokens,
+            completion_tokens,
+            0 if cache_read_tokens is None else cache_read_tokens,
+            0 if cache_creation_tokens is None else cache_creation_tokens,
+        )
+        if text_tokens is not None:
+            raw_tokens = (*raw_tokens, text_tokens)
+        if not all(
+            AnthropicPassthroughLoggingHandler._is_nonnegative_finite_number(value)
+            for value in raw_tokens
+        ):
+            return None
+
+        cached_prompt_tokens = float(cache_read_tokens or 0) + float(
+            cache_creation_tokens or 0
+        )
+        if text_tokens is None:
+            if cached_prompt_tokens > float(prompt_tokens):
+                return None
+            text_tokens = float(prompt_tokens) - cached_prompt_tokens
+        elif float(text_tokens) + cached_prompt_tokens > float(prompt_tokens):
+            return None
+        cache_read_price = model_info.get("cache_read_input_token_cost", input_price)
+        cache_creation_price = model_info.get(
+            "cache_creation_input_token_cost", input_price
+        )
+        prices = (input_price, output_price, cache_read_price, cache_creation_price)
+        if not all(
+            AnthropicPassthroughLoggingHandler._is_nonnegative_finite_number(value)
+            for value in prices
+        ):
+            return None
+
+        return (
+            float(text_tokens) * float(input_price)
+            + float(completion_tokens) * float(output_price)
+            + float(cache_read_tokens or 0) * float(cache_read_price)
+            + float(cache_creation_tokens or 0) * float(cache_creation_price)
+        )
+
     @staticmethod
     def anthropic_passthrough_handler(
         httpx_response: httpx.Response,
@@ -134,16 +256,44 @@ class AnthropicPassthroughLoggingHandler:
                 )
             )
 
-            response_cost = litellm.completion_cost(
-                completion_response=litellm_model_response,
-                model=model_for_cost,
-                custom_llm_provider=custom_llm_provider,
-                custom_pricing=custom_pricing,
-                router_model_id=router_model_id,
-            )
+            # Keep the shared calculator authoritative so registered tiered,
+            # service-tier, and provider-specific pricing semantics remain
+            # intact. Only its explicit unmapped-model failure may fall back
+            # to the Router's trusted request-local four-bucket price.
+            try:
+                response_cost = litellm.completion_cost(
+                    completion_response=litellm_model_response,
+                    model=model_for_cost,
+                    custom_llm_provider=custom_llm_provider,
+                    custom_pricing=custom_pricing,
+                    router_model_id=router_model_id,
+                )
+            except Exception as cost_error:
+                if not AnthropicPassthroughLoggingHandler._is_unmapped_model_error(
+                    cost_error
+                ):
+                    raise
+                response_cost = (
+                    AnthropicPassthroughLoggingHandler._get_router_bound_response_cost(
+                        litellm_model_response=litellm_model_response,
+                        logging_obj=logging_obj,
+                    )
+                )
+                if response_cost is None:
+                    raise
 
             kwargs["response_cost"] = response_cost
             kwargs["model"] = model
+            # Spend callbacks read the canonical logging object rather than
+            # only the success-handler kwargs. Persist the same calculated
+            # value here so streamed Anthropic requests do not silently record
+            # zero after the response payload was priced correctly.
+            logging_obj.model_call_details["response_cost"] = response_cost
+            # Async streaming success re-runs the shared response-cost helper
+            # from the assembled response. Carry the trusted result in hidden
+            # params so that helper preserves it instead of recalculating the
+            # unmapped public Anthropic alias back to zero.
+            litellm_model_response._hidden_params["response_cost"] = response_cost
             passthrough_logging_payload: Optional[PassthroughStandardLoggingPayload] = (  # type: ignore
                 kwargs.get("passthrough_logging_payload")
             )

@@ -1,3 +1,9 @@
+"""Shared LiteLLM response types, provider selection and retry wrappers.
+
+Managed Wokey media configs reuse HTTP transport; uncertain media submissions
+retain their no-resubmit marker through the public wrapper.
+"""
+
 # from __future__ import annotations must be the first non-comment statement
 from __future__ import annotations
 
@@ -1214,6 +1220,14 @@ def _get_wrapper_num_retries(
     Used for the wrapper functions.
     """
 
+    if getattr(exception, "media_no_resubmit", False):
+        return 0, kwargs
+    # A Kie timeout may follow an accepted createTask; retries create duplicate jobs.
+    if (
+        isinstance(exception, litellm.Timeout)
+        and getattr(exception, "llm_provider", None) == "kie"
+    ):
+        return 0, kwargs
     num_retries = kwargs.get("num_retries", None)
     if num_retries is None:
         num_retries = litellm.num_retries
@@ -3979,11 +3993,17 @@ def get_optional_params(  # noqa: PLR0915
         model=model,
         provider_config=provider_config,
     )
+    if non_default_params.get("vector_store_ids") == []:
+        # Empty vector store selections are a no-op. Dropping them here prevents
+        # provider adapters from forwarding unsupported empty params downstream.
+        non_default_params.pop("vector_store_ids", None)
     optional_params = pre_process_optional_params(
         passed_params=passed_params,
         non_default_params=non_default_params,
         custom_llm_provider=custom_llm_provider,
     )
+    if optional_params.get("vector_store_ids") == []:
+        optional_params.pop("vector_store_ids", None)
 
     def _check_valid_arg(supported_params: List[str]):
         """
@@ -4729,6 +4749,9 @@ def get_optional_params(  # noqa: PLR0915
         for path in nested_paths:
             optional_params = delete_nested_value(optional_params, path)
 
+    if optional_params.get("vector_store_ids") == []:
+        optional_params.pop("vector_store_ids", None)
+
     return optional_params
 
 
@@ -4799,11 +4822,21 @@ def _apply_openai_param_overrides(
     If user passes in allowed_openai_params, apply them to optional_params
 
     These params will get passed as is to the LLM API since the user opted in to passing them in the request
+
+    Only params the caller actually sent are forwarded. Previously this
+    function unconditionally wrote `None` for any allowed param missing from
+    the request, which then reached the provider SDK as a top-level kwarg it
+    did not recognize (e.g. openai SDK raising
+    `AsyncCompletions.create() got an unexpected keyword argument 'enable_thinking'`).
+    See https://github.com/BerriAI/litellm/issues/25697
     """
     if allowed_openai_params:
         for param in allowed_openai_params:
-            if param not in optional_params:
-                optional_params[param] = non_default_params.pop(param, None)
+            if param in optional_params:
+                continue
+            if param not in non_default_params:
+                continue
+            optional_params[param] = non_default_params.pop(param)
     return optional_params
 
 
@@ -5541,6 +5574,16 @@ def _is_potential_model_name_in_model_cost(
     )
 
 
+_DYNAMIC_TOKEN_TIER_COST_FIELD_PATTERN = re.compile(
+    r"^(?:(?:input_cost_per_token|output_cost_per_token)_above_"
+    r"[0-9]+(?:\.[0-9]+)?k?_tokens(?:_(?:flex|priority))?|"
+    r"(?:cache_read_input_token_cost|cache_creation_input_token_cost)_above_"
+    r"[0-9]+(?:\.[0-9]+)?k?_tokens|"
+    r"cache_creation_input_token_cost_above_1hr_above_"
+    r"[0-9]+(?:\.[0-9]+)?k?_tokens)$"
+)
+
+
 def _get_model_info_helper(  # noqa: PLR0915
     model: str,
     custom_llm_provider: Optional[str] = None,
@@ -5691,7 +5734,7 @@ def _get_model_info_helper(  # noqa: PLR0915
                 )
                 _output_cost_per_token = 0
 
-            return ModelInfoBase(
+            model_info_base = ModelInfoBase(
                 key=key,
                 max_tokens=_model_info.get("max_tokens", None),
                 max_input_tokens=_model_info.get("max_input_tokens", None),
@@ -5834,6 +5877,8 @@ def _get_model_info_helper(  # noqa: PLR0915
                 supports_web_search=_model_info.get("supports_web_search", None),
                 supports_url_context=_model_info.get("supports_url_context", None),
                 supports_reasoning=_model_info.get("supports_reasoning", None),
+                supports_none_reasoning_effort=_model_info.get("supports_none_reasoning_effort", None),
+                supports_xhigh_reasoning_effort=_model_info.get("supports_xhigh_reasoning_effort", None),
                 supports_computer_use=_model_info.get("supports_computer_use", None),
                 search_context_cost_per_query=_model_info.get(
                     "search_context_cost_per_query", None
@@ -5849,6 +5894,22 @@ def _get_model_info_helper(  # noqa: PLR0915
                 ),
                 uses_embed_content=_model_info.get("uses_embed_content", None),
             )
+
+            if "kie_config" in _model_info:
+                model_info_base["kie_config"] = _model_info["kie_config"]
+
+            # Generic token-cost calculation discovers arbitrary thresholds by key name;
+            # preserve only numeric tier fields it understands because ModelInfoBase
+            # enumerates common thresholds but cannot represent model-specific cutoffs.
+            dynamic_tier_costs = {
+                field_name: value
+                for field_name, value in _model_info.items()
+                if _DYNAMIC_TOKEN_TIER_COST_FIELD_PATTERN.fullmatch(field_name)
+                and isinstance(value, (int, float))
+                and not isinstance(value, bool)
+            }
+            cast(Dict[str, Any], model_info_base).update(dynamic_tier_costs)
+            return model_info_base
     except Exception as e:
         verbose_logger.debug(f"Error getting model info: {e}")
         raise Exception(
@@ -8366,6 +8427,12 @@ class ProviderConfigManager:
             )
 
             return MinimaxMessagesConfig()
+        elif litellm.LlmProviders.OPENROUTER == provider:
+            from litellm.llms.openrouter.messages.transformation import (
+                OpenRouterAnthropicMessagesConfig,
+            )
+
+            return OpenRouterAnthropicMessagesConfig()
         return None
 
     @staticmethod
@@ -8874,6 +8941,16 @@ class ProviderConfigManager:
             )
 
             return get_openrouter_image_generation_config(model)
+        elif LlmProviders.KIE == provider:
+            from litellm.llms.kie.image_generation.transformation import (
+                KieImageGenerationConfig,
+            )
+
+            return KieImageGenerationConfig()
+        elif LlmProviders.WOKEY == provider:
+            from litellm.llms.wokey.images import WokeyImageGenerationConfig
+
+            return WokeyImageGenerationConfig()
         return None
 
     @staticmethod
@@ -8901,6 +8978,20 @@ class ProviderConfigManager:
             from litellm.llms.runwayml.videos.transformation import RunwayMLVideoConfig
 
             return RunwayMLVideoConfig()
+        elif LlmProviders.OPENROUTER == provider:
+            from litellm.llms.openrouter.videos.transformation import (
+                OpenRouterVideoConfig,
+            )
+
+            return OpenRouterVideoConfig()
+        elif LlmProviders.KIE == provider:
+            from litellm.llms.kie.videos.transformation import KieVideoConfig
+
+            return KieVideoConfig()
+        elif LlmProviders.WOKEY == provider:
+            from litellm.llms.wokey.videos import WokeyVideoConfig
+
+            return WokeyVideoConfig()
         return None
 
     @staticmethod
@@ -9015,6 +9106,14 @@ class ProviderConfigManager:
             )
 
             return get_openrouter_image_edit_config(model)
+        elif LlmProviders.KIE == provider:
+            from litellm.llms.kie.image_edit.transformation import KieImageEditConfig
+
+            return KieImageEditConfig()
+        elif LlmProviders.WOKEY == provider:
+            from litellm.llms.wokey.images import WokeyImageEditConfig
+
+            return WokeyImageEditConfig()
         return None
 
     @staticmethod

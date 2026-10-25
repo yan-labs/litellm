@@ -1,3 +1,10 @@
+"""Shared pass-through streaming handler.
+
+Kollab's Anthropic Messages route reuses this handler for stream delivery and
+post-stream logging. The added latency markers show whether LiteLLM already
+has provider bytes or is still waiting before the first pass-through chunk.
+"""
+
 import asyncio
 from datetime import datetime
 from typing import List, Optional
@@ -10,6 +17,7 @@ from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
 from litellm.litellm_core_utils.thread_pool_executor import executor
 from litellm.proxy._types import PassThroughEndpointLoggingResultValues
 from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
+from litellm.proxy.kollab_latency_debug import latency_now, log_latency_stage
 from litellm.types.passthrough_endpoints.pass_through_endpoints import EndpointType
 from litellm.types.utils import StandardPassThroughResponseObject
 
@@ -43,6 +51,16 @@ class PassThroughStreamingHandler:
         """
         try:
             raw_bytes: List[bytes] = []
+            first_chunk_seen = False
+            stream_started_at = latency_now()
+            log_latency_stage(
+                "passthrough_stream_iteration_start",
+                started_at=stream_started_at,
+                data=request_body,
+                logging_obj=litellm_logging_obj,
+                route_type="pass_through_endpoint",
+                details={"endpoint_type": str(endpoint_type), "url_route": url_route},
+            )
             # Extract model name for cost injection
             model_name = PassThroughStreamingHandler._extract_model_for_cost_injection(
                 request_body=request_body,
@@ -53,6 +71,20 @@ class PassThroughStreamingHandler:
 
             async for chunk in response.aiter_bytes():
                 raw_bytes.append(chunk)
+                if not first_chunk_seen:
+                    first_chunk_seen = True
+                    log_latency_stage(
+                        "passthrough_first_stream_chunk",
+                        started_at=stream_started_at,
+                        data=request_body,
+                        logging_obj=litellm_logging_obj,
+                        route_type="pass_through_endpoint",
+                        details={
+                            "endpoint_type": str(endpoint_type),
+                            "url_route": url_route,
+                            "chunk_bytes": len(chunk),
+                        },
+                    )
                 if (
                     getattr(litellm, "include_cost_in_streaming_usage", False)
                     and model_name
@@ -76,6 +108,18 @@ class PassThroughStreamingHandler:
 
             # After all chunks are processed, handle post-processing
             end_time = datetime.now()
+            log_latency_stage(
+                "passthrough_stream_iteration_finished",
+                started_at=stream_started_at,
+                data=request_body,
+                logging_obj=litellm_logging_obj,
+                route_type="pass_through_endpoint",
+                details={
+                    "endpoint_type": str(endpoint_type),
+                    "url_route": url_route,
+                    "chunk_count": len(raw_bytes),
+                },
+            )
 
             asyncio.create_task(
                 PassThroughStreamingHandler._route_streaming_logging_to_handler(

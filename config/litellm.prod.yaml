@@ -1,0 +1,986 @@
+model_list:
+  - model_name: seedance-2-mini
+    litellm_params:
+      model: kie/bytedance/seedance-2-mini
+      custom_llm_provider: kie
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      timeout: 30
+    model_info:
+      mode: video_generation
+
+  - model_name: grok-imagine-image
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      num_retries: 0
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: wokey
+      litellm_credential_name: wokey
+      model: wokey/grok-imagine-image-2.0
+    model_info:
+      mode: image_generation
+      disable_health_check: true
+  - model_name: __route__grok-imagine-image__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      custom_llm_provider: kie
+      litellm_credential_name: kie-ai
+      model: kie/grok-imagine-image-2-0
+    model_info:
+      mode: image_generation
+      disable_health_check: true
+
+  - model_name: gemini-3.1-flash-image
+    litellm_params:
+      model: vertex_ai/gemini-3.1-flash-image
+      custom_llm_provider: vertex_ai
+      litellm_credential_name: vertex_ai/gemini-3.1-pro-preview-credential-a6d39be8-cdf4-4f8c-92b5-2ebdbf160cf5
+      vertex_location: global
+      max_tokens: 8000
+    model_info:
+      mode: chat
+      input_cost_per_image: 0.00056
+      input_cost_per_token: 5.0e-07
+      max_input_tokens: 65536
+      max_output_tokens: 32768
+      output_cost_per_image: 0.0672
+      output_cost_per_image_token: 6.0e-05
+      output_cost_per_token: 3.0e-06
+
+  - model_name: gemini-omni
+    litellm_params:
+      model: vertex_ai/gemini-omni-1.1-flash-preview
+      custom_llm_provider: vertex_ai
+      litellm_credential_name: vertex_ai/gemini-3.1-pro-preview-credential-a6d39be8-cdf4-4f8c-92b5-2ebdbf160cf5
+      vertex_location: global
+    model_info:
+      mode: video_generation
+      input_cost_per_token: 0.0000015
+      output_cost_per_token: 0.000009
+      output_cost_per_video_token: 0.0000175
+  # Claude 主用 Wokey、备用 KIE；历史 Bedrock 别名保留为兼容入口。
+  # 路由名保留 bedrock-claude-haiku 是为了不动 server/skills-server 里现有的调用方
+  # （standalone-media-models.ts、model-price-config.ts、model_capabilities.py），
+  - model_name: bedrock-claude-haiku
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 0
+      api_base: https://api.wokey.ai
+      custom_llm_provider: anthropic
+      litellm_credential_name: wokey
+      model: anthropic/claude-haiku-5-5
+    model_info:
+      litellm_provider: anthropic
+      mode: chat
+      max_input_tokens: 1000000
+      input_cost_per_token: 1.0e-07
+      output_cost_per_token: 5.0e-07
+      cache_read_input_token_cost: 1.0e-08
+      cache_creation_input_token_cost: 1.25e-07
+      cache_creation_input_token_cost_above_1hr: 2.0e-07
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+      max_output_tokens: 128000
+      input_cost_per_token_above_100k_tokens: 5.0e-07
+      output_cost_per_token_above_100k_tokens: 2.5e-06
+      cache_read_input_token_cost_above_100k_tokens: 5.0e-08
+      cache_creation_input_token_cost_above_100k_tokens: 6.25e-07
+      cache_creation_input_token_cost_above_1hr_above_100k_tokens: 1.0e-06
+  - model_name: __route__bedrock-claude-haiku__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/claude
+      custom_llm_provider: anthropic
+      litellm_credential_name: kie-ai
+      model: anthropic/claude-haiku-5-5
+    model_info:
+      litellm_provider: anthropic
+      mode: chat
+      max_input_tokens: 1000000
+      input_cost_per_token: 1.0e-07
+      output_cost_per_token: 5.0e-07
+      cache_read_input_token_cost: 1.0e-08
+      cache_creation_input_token_cost: 1.25e-07
+      cache_creation_input_token_cost_above_1hr: 2.0e-07
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+      max_output_tokens: 128000
+      input_cost_per_token_above_100k_tokens: 5.0e-07
+      output_cost_per_token_above_100k_tokens: 2.5e-06
+      cache_read_input_token_cost_above_100k_tokens: 5.0e-08
+      cache_creation_input_token_cost_above_100k_tokens: 6.25e-07
+      cache_creation_input_token_cost_above_1hr_above_100k_tokens: 1.0e-06
+  # Claude batch 2 routes are YAML-managed below; Fable remains DB-owned.
+  # Claude 5.5 uses kie.ai Anthropic messages with the managed kie-ai credential.
+  # Existing model metadata and pricing are unchanged by this route migration.
+  - model_name: claude-opus-5-5
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai
+      custom_llm_provider: anthropic
+      litellm_credential_name: wokey
+      model: anthropic/claude-opus-5-5
+    model_info:
+      litellm_provider: anthropic
+      mode: chat
+      max_input_tokens: 1000000
+      input_cost_per_token: 4.0e-06
+      output_cost_per_token: 2.0e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 5.0e-06
+      cache_creation_input_token_cost_above_1hr: 8.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+  - model_name: __route__claude-opus-5-5__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/claude
+      custom_llm_provider: anthropic
+      litellm_credential_name: kie-ai
+      model: anthropic/claude-opus-5-5
+    model_info:
+      litellm_provider: anthropic
+      mode: chat
+      max_input_tokens: 1000000
+      input_cost_per_token: 4.0e-06
+      output_cost_per_token: 2.0e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 5.0e-06
+      cache_creation_input_token_cost_above_1hr: 8.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+  # Keep Sonnet 5.5 available before the product catalog is released.
+  - model_name: claude-sonnet-5-5
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai
+      custom_llm_provider: anthropic
+      litellm_credential_name: wokey
+      model: anthropic/claude-sonnet-5-5
+    model_info:
+      litellm_provider: anthropic
+      mode: chat
+      max_input_tokens: 1000000
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      cache_creation_input_token_cost_above_1hr: 4.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+  - model_name: __route__claude-sonnet-5-5__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/claude
+      custom_llm_provider: anthropic
+      litellm_credential_name: kie-ai
+      model: anthropic/claude-sonnet-5-5
+    model_info:
+      litellm_provider: anthropic
+      mode: chat
+      max_input_tokens: 1000000
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      cache_creation_input_token_cost_above_1hr: 4.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+  - model_name: claude-haiku-5-5
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 0
+      api_base: https://api.wokey.ai
+      custom_llm_provider: anthropic
+      litellm_credential_name: wokey
+      model: anthropic/claude-haiku-5-5
+    model_info:
+      litellm_provider: anthropic
+      mode: chat
+      max_input_tokens: 1000000
+      input_cost_per_token: 1.0e-07
+      output_cost_per_token: 5.0e-07
+      cache_read_input_token_cost: 1.0e-08
+      cache_creation_input_token_cost: 1.25e-07
+      cache_creation_input_token_cost_above_1hr: 2.0e-07
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+      max_output_tokens: 128000
+      input_cost_per_token_above_100k_tokens: 5.0e-07
+      output_cost_per_token_above_100k_tokens: 2.5e-06
+      cache_read_input_token_cost_above_100k_tokens: 5.0e-08
+      cache_creation_input_token_cost_above_100k_tokens: 6.25e-07
+      cache_creation_input_token_cost_above_1hr_above_100k_tokens: 1.0e-06
+  - model_name: __route__claude-haiku-5-5__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/claude
+      custom_llm_provider: anthropic
+      litellm_credential_name: kie-ai
+      model: anthropic/claude-haiku-5-5
+    model_info:
+      litellm_provider: anthropic
+      mode: chat
+      max_input_tokens: 1000000
+      input_cost_per_token: 1.0e-07
+      output_cost_per_token: 5.0e-07
+      cache_read_input_token_cost: 1.0e-08
+      cache_creation_input_token_cost: 1.25e-07
+      cache_creation_input_token_cost_above_1hr: 2.0e-07
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+      max_output_tokens: 128000
+      input_cost_per_token_above_100k_tokens: 5.0e-07
+      output_cost_per_token_above_100k_tokens: 2.5e-06
+      cache_read_input_token_cost_above_100k_tokens: 5.0e-08
+      cache_creation_input_token_cost_above_100k_tokens: 6.25e-07
+      cache_creation_input_token_cost_above_1hr_above_100k_tokens: 1.0e-06
+  - model_name: gemini-3.5-flash-lite
+    litellm_params:
+      model: gemini-3.5-flash-lite
+      custom_llm_provider: vertex_ai
+      litellm_credential_name: vertex_ai/gemini-3.1-pro-preview-credential-a6d39be8-cdf4-4f8c-92b5-2ebdbf160cf5
+    model_info:
+      mode: chat
+      max_input_tokens: 1048576
+      max_output_tokens: 65536
+      input_cost_per_token: 0.0000003
+      cache_read_input_token_cost: 0.00000003
+      output_cost_per_token: 0.0000025
+      output_cost_per_reasoning_token: 0.0000025
+      supports_reasoning: true
+  - model_name: gpt-6-astra
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: openai
+      litellm_credential_name: wokey
+      model: openai/responses/gpt-6-astra
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 1050000
+      input_cost_per_token: 1.0e-05
+      output_cost_per_token: 5.0e-05
+      cache_read_input_token_cost: 1.0e-06
+      cache_creation_input_token_cost: 1.25e-05
+      input_cost_per_token_above_271999_tokens: 2.0e-05
+      output_cost_per_token_above_271999_tokens: 7.5e-05
+      cache_read_input_token_cost_above_271999_tokens: 2.0e-06
+      cache_creation_input_token_cost_above_271999_tokens: 2.5e-05
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+  - model_name: __route__gpt-6-astra__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/codex/v1
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      model: openai/responses/gpt-6-astra
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 1050000
+      input_cost_per_token: 1.0e-05
+      output_cost_per_token: 5.0e-05
+      cache_read_input_token_cost: 1.0e-06
+      cache_creation_input_token_cost: 1.25e-05
+      input_cost_per_token_above_271999_tokens: 2.0e-05
+      output_cost_per_token_above_271999_tokens: 7.5e-05
+      cache_read_input_token_cost_above_271999_tokens: 2.0e-06
+      cache_creation_input_token_cost_above_271999_tokens: 2.5e-05
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+  # GPT 官方价格： $2/MTok input, $10/MTok output, $0.2/MTok cache read,
+  # $2.5/MTok cache write; at prompt >= 272k tokens the rate rises to $4/$15/
+  # $0.4/$5 per MTok. 1.05M context, 128k max output. Mirrors the TEST route
+  # that was verified first with a real /v1/chat/completions 200.
+  - model_name: gpt-6-sol
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: openai
+      litellm_credential_name: wokey
+      model: openai/responses/gpt-6-sol
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      disable_health_check: true
+  - model_name: __route__gpt-6-sol__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/codex/v1
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      model: openai/responses/gpt-6-sol
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      disable_health_check: true
+  # Keep the new alias ready for the next authorized PROD activation while the
+  # old alias remains available to clients during the rolling transition.
+  - model_name: gpt-6.1-sol
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: openai
+      litellm_credential_name: wokey
+      model: openai/responses/gpt-6.1-sol
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 1050000
+      max_output_tokens: 128000
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 1.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      input_cost_per_token_above_271999_tokens: 4.0e-06
+      output_cost_per_token_above_271999_tokens: 1.5e-05
+      cache_read_input_token_cost_above_271999_tokens: 2.0e-07
+      cache_creation_input_token_cost_above_271999_tokens: 5.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      max_tokens: 128000
+      disable_health_check: true
+  - model_name: __route__gpt-6.1-sol__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/codex/v1
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      model: openai/responses/gpt-6-1-sol
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 1050000
+      max_output_tokens: 128000
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 1.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      input_cost_per_token_above_271999_tokens: 4.0e-06
+      output_cost_per_token_above_271999_tokens: 1.5e-05
+      cache_read_input_token_cost_above_271999_tokens: 2.0e-07
+      cache_creation_input_token_cost_above_271999_tokens: 5.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      max_tokens: 128000
+      disable_health_check: true
+  # Current public aliases reuse existing managed credentials; legacy routes remain for rolling compatibility.
+  - model_name: gpt-6-luna
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: openai
+      litellm_credential_name: wokey
+      model: openai/responses/gpt-6.1-sol
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 1050000
+      max_output_tokens: 128000
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 1.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      input_cost_per_token_above_271999_tokens: 4.0e-06
+      output_cost_per_token_above_271999_tokens: 1.5e-05
+      cache_read_input_token_cost_above_271999_tokens: 2.0e-07
+      cache_creation_input_token_cost_above_271999_tokens: 5.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      max_tokens: 128000
+      disable_health_check: true
+  - model_name: __route__gpt-6-luna__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/codex/v1
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      model: openai/responses/gpt-6-1-sol
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 1050000
+      max_output_tokens: 128000
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 1.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      input_cost_per_token_above_271999_tokens: 4.0e-06
+      output_cost_per_token_above_271999_tokens: 1.5e-05
+      cache_read_input_token_cost_above_271999_tokens: 2.0e-07
+      cache_creation_input_token_cost_above_271999_tokens: 5.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      max_tokens: 128000
+      disable_health_check: true
+  - model_name: grok-4.7
+    litellm_params:
+      model: openai/responses/grok-4-7
+      api_base: https://api.kie.ai/codex/v1
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 500000
+      max_output_tokens: 65536
+      input_cost_per_token: 0.0000016
+      cache_read_input_token_cost: 0.0000004
+      output_cost_per_token: 0.0000048
+      output_cost_per_reasoning_token: 0.0000048
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      max_tokens: 65536
+  - model_name: gpt-5.6-sol
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: openai
+      litellm_credential_name: wokey
+      model: openai/responses/gpt-5.6-sol
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      disable_health_check: true
+  - model_name: __route__gpt-5.6-sol__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/codex/v1
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      model: openai/responses/gpt-5-6-sol
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.0e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      disable_health_check: true
+  - model_name: gpt-5.6-terra
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: openai
+      litellm_credential_name: wokey
+      model: openai/responses/gpt-5.6-terra
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 262144
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.2e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      input_cost_per_token_above_271999_tokens: 4.0e-06
+      output_cost_per_token_above_271999_tokens: 1.8e-05
+      cache_read_input_token_cost_above_271999_tokens: 4.0e-07
+      cache_creation_input_token_cost_above_271999_tokens: 5.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+  - model_name: __route__gpt-5.6-terra__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/codex/v1
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      model: openai/responses/gpt-5-6-terra
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 262144
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 1.2e-05
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 2.5e-06
+      input_cost_per_token_above_271999_tokens: 4.0e-06
+      output_cost_per_token_above_271999_tokens: 1.8e-05
+      cache_read_input_token_cost_above_271999_tokens: 4.0e-07
+      cache_creation_input_token_cost_above_271999_tokens: 5.0e-06
+      supports_reasoning: true
+      supports_function_calling: true
+      supports_prompt_caching: true
+      disable_health_check: true
+  - model_name: gpt-5.6-luna
+    litellm_params:
+      model: openai/responses/gpt-5-6-luna
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      api_base: https://api.kie.ai/codex/v1
+      num_retries: 1
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      input_cost_per_token: 2.0e-07
+      output_cost_per_token: 1.2e-06
+      cache_read_input_token_cost: 2.0e-08
+      cache_creation_input_token_cost: 2.5e-07
+  # Kollab 只调用这个稳定别名；生产和 TEST 必须同时声明，防止应用发布后环境间路由漂移。
+  # Vertex 项目和凭据由东京 LiteLLM 托管，不会暴露给 CLI、Agent 或网页。
+  - model_name: veo-3
+    litellm_params:
+      model: vertex_ai/veo-3.1-generate-001
+      litellm_credential_name: vertex_ai/gemini-3.1-pro-preview-credential-a6d39be8-cdf4-4f8c-92b5-2ebdbf160cf5
+    model_info:
+      mode: video_generation
+  # PROD 全部图片视频别名使用与 TEST 相同的 kie/Vertex 定义。
+  # Seedance 2 keeps Kollab's public alias stable while the gateway owns the
+  # managed KIE model id, credential, async polling, and raw content streaming.
+  # This route must stay in both TEST and PROD so the product never falls back
+  # to a direct provider call when an environment is promoted.
+  - model_name: seedance-2
+    litellm_params:
+      model: kie/bytedance/seedance-2-fast
+      custom_llm_provider: kie
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      timeout: 30
+    model_info:
+      mode: video_generation
+  # These aliases keep provider ids and credentials inside the managed gateway.
+  - model_name: seedance-2.5
+    litellm_params:
+      model: kie/bytedance/seedance-2-5
+      custom_llm_provider: kie
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      timeout: 30
+    model_info:
+      mode: video_generation
+  - model_name: hailuo-3
+    litellm_params:
+      model: kie/kling-3.0/video
+      custom_llm_provider: kie
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      timeout: 30
+    model_info:
+      mode: video_generation
+  - model_name: grok-imagine-video
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      num_retries: 0
+      timeout: 30
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: wokey
+      litellm_credential_name: wokey
+      model: wokey/grok-imagine-video-1.5
+    model_info:
+      mode: video_generation
+      disable_health_check: true
+  - model_name: __route__grok-imagine-video__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      timeout: 30
+      custom_llm_provider: kie
+      litellm_credential_name: kie-ai
+      model: kie/grok-imagine-video-1-5-preview
+    model_info:
+      mode: video_generation
+      disable_health_check: true
+  # Explicit managed aliases reuse the existing Tokyo binding. Route presence
+  # does not grant a caller access; service authorization remains unchanged.
+  # Public alias `gpt-image-2` now routes to GPT Image 2.5
+  # (`openai/gpt-image-2.5-flare`) in PROD too, matching TEST. The prior
+  # image and was verified there — that gate has now passed, so PROD no
+  # longer needs to stay pinned to the historical gpt-5.4-image-2 upstream.
+  # The release gate (scripts/validate_multimedia_config.py
+  # APPROVED["gpt-image-2"]) was updated to match this single upstream.
+  - model_name: gpt-image-2
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      num_retries: 0
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: wokey
+      litellm_credential_name: wokey
+      model: wokey/gpt-image-2.5
+    model_info:
+      mode: image_generation
+      disable_health_check: true
+  - model_name: __route__gpt-image-2__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      custom_llm_provider: kie
+      litellm_credential_name: kie-ai
+      model: kie/gpt-image-2-5-flare
+    model_info:
+      mode: image_generation
+      disable_health_check: true
+  - model_name: openrouter-tts/*
+    litellm_params:
+      model: openai/*
+      api_base: https://openrouter.ai/api/v1
+      custom_llm_provider: openai
+      litellm_credential_name: openrouter-toyo
+    model_info:
+      mode: audio_speech
+  - model_name: openrouter-stt/*
+    litellm_params:
+      model: openai/*
+      api_base: https://openrouter.ai/api/v1
+      custom_llm_provider: openai
+      litellm_credential_name: openrouter-toyo
+    model_info:
+      mode: audio_transcription
+  # 聊天不声明 OpenRouter 通配或备用；语音保持独立受管前缀，待等价路线验收。
+  # cache-write bucket uses the input price because the public rate card has no separate value.
+  # Grok 4.6 uses kie Responses; keep capabilities and Kollab catalog prices.
+  - model_name: grok-4.6
+    litellm_params:
+      model: openai/responses/grok-4-6
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      custom_llm_provider: openai
+      api_base: https://api.kie.ai/grok/v1
+      num_retries: 1
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      max_input_tokens: 500000
+      max_output_tokens: 65536
+      input_cost_per_token: 2.0e-06
+      cache_read_input_token_cost: 5.0e-07
+      output_cost_per_token: 6.0e-06
+      output_cost_per_reasoning_token: 6.0e-06
+      supports_reasoning: true
+      cache_creation_input_token_cost: 2.0e-06
+  # kimi-k3 intentionally remains DB-only on the Alibaba DashScope route. Keeping the
+  # public alias out of YAML prevents simple-shuffle from mixing providers while preserving
+  # existing conversations, bots, and timers that already store the kimi-k3 selection.
+
+  # YAML owns batch 2 chat routes; remove the same-name legacy DB routes after release.
+  - model_name: gpt-5.5
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai/v1
+      custom_llm_provider: openai
+      litellm_credential_name: wokey
+      model: openai/responses/gpt-5.5
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      input_cost_per_token: 5.0e-06
+      output_cost_per_token: 3.0e-05
+      cache_read_input_token_cost: 5.0e-07
+      cache_creation_input_token_cost: 0.0
+      disable_health_check: true
+  - model_name: __route__gpt-5.5__kie
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.kie.ai/codex/v1
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      model: openai/responses/gpt-5-5
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      input_cost_per_token: 5.0e-06
+      output_cost_per_token: 3.0e-05
+      cache_read_input_token_cost: 5.0e-07
+      cache_creation_input_token_cost: 0.0
+      disable_health_check: true
+  - model_name: grok-4.3
+    litellm_params:
+      model: openai/responses/grok-4-3
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      api_base: https://api.kie.ai/grok/v1
+      num_retries: 1
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      input_cost_per_token: 1.25e-06
+      output_cost_per_token: 2.5e-06
+      cache_read_input_token_cost: 2.0e-07
+      cache_creation_input_token_cost: 1.25e-06
+  - model_name: grok-4.5
+    litellm_params:
+      model: openai/responses/grok-4-5
+      custom_llm_provider: openai
+      litellm_credential_name: kie-ai
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      api_base: https://api.kie.ai/grok/v1
+      num_retries: 1
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: openai
+      mode: chat
+      input_cost_per_token: 2.0e-06
+      output_cost_per_token: 6.0e-06
+      cache_read_input_token_cost: 3.0e-07
+      cache_creation_input_token_cost: 2.0e-06
+  - model_name: claude-fable-5-1
+    litellm_params:
+      use_in_pass_through: false
+      use_litellm_proxy: false
+      merge_reasoning_content_in_choices: false
+      num_retries: 1
+      api_base: https://api.wokey.ai
+      custom_llm_provider: anthropic
+      litellm_credential_name: wokey
+      model: anthropic/claude-fable-5-1
+    model_info:
+      litellm_provider: anthropic
+      health_check_max_tokens: 16
+      input_cost_per_token: 1.0e-05
+      output_cost_per_token: 5.0e-05
+      cache_read_input_token_cost: 2.5e-07
+      cache_creation_input_token_cost: 1.25e-05
+      disable_health_check: true
+  - model_name: gpt-5-mini
+    litellm_params:
+      vertex_location: global
+      additional_drop_params:
+      - max_tokens
+      - max_completion_tokens
+      max_output_tokens: 65535
+      custom_llm_provider: vertex_ai
+      litellm_credential_name: vertex_ai/gemini-3.1-pro-preview-credential-a6d39be8-cdf4-4f8c-92b5-2ebdbf160cf5
+      model: vertex_ai/gemini-3.1-flash-lite
+    model_info:
+      litellm_provider: vertex_ai
+      mode: chat
+      input_cost_per_token: 2.5e-07
+      output_cost_per_token: 1.5e-06
+      max_input_tokens: 1048576
+      max_output_tokens: 65536
+      disable_health_check: true
+  - model_name: gemini-4-argon
+    litellm_params:
+      vertex_location: global
+      max_output_tokens: 32768
+      num_retries: 0
+      custom_llm_provider: vertex_ai
+      litellm_credential_name: vertex_ai/gemini-3.1-pro-preview-credential-a6d39be8-cdf4-4f8c-92b5-2ebdbf160cf5
+      model: vertex_ai/gemini-4-argon
+    model_info:
+      mode: chat
+      max_input_tokens: 1048576
+      max_output_tokens: 32768
+      input_cost_per_token: 4.0e-06
+      cache_read_input_token_cost: 2.0e-07
+      output_cost_per_token: 2.0e-05
+      output_cost_per_reasoning_token: 2.0e-05
+      supports_reasoning: true
+      supports_vision: true
+      supports_function_calling: true
+      supports_response_schema: true
+      disable_health_check: true
+router_settings:
+  redis_host: litellm-tokyo-redis.e4yzov.0001.apne1.cache.amazonaws.com
+  redis_port: 6379
+  routing_strategy: simple-shuffle
+  fallbacks:
+  - claude-opus-5-5:
+    - __route__claude-opus-5-5__kie
+  - claude-sonnet-5-5:
+    - __route__claude-sonnet-5-5__kie
+  - claude-haiku-5-5:
+    - __route__claude-haiku-5-5__kie
+  - gpt-6-astra:
+    - __route__gpt-6-astra__kie
+  - gpt-6.1-sol:
+    - __route__gpt-6.1-sol__kie
+  - gpt-6-luna:
+    - __route__gpt-6-luna__kie
+  - gpt-5.6-terra:
+    - __route__gpt-5.6-terra__kie
+  - gpt-5.5:
+    - __route__gpt-5.5__kie
+  - gpt-5.6-sol:
+    - __route__gpt-5.6-sol__kie
+  - gpt-6-sol:
+    - __route__gpt-6-sol__kie
+  - grok-imagine-image:
+    - __route__grok-imagine-image__kie
+  - bedrock-claude-haiku:
+    - __route__bedrock-claude-haiku__kie
+  - grok-imagine-video:
+    - __route__grok-imagine-video__kie
+  - gpt-image-2:
+    - __route__gpt-image-2__kie
+general_settings:
+  # Master key MUST come from the runtime env (LITELLM_MASTER_KEY), not a literal.
+  # The AgentCore LLM Gateway authenticates to this proxy with that same env key to
+  # mint per-session virtual keys; a literal here that differs from the env key makes
+  # the proxy reject the gateway key (401 token_not_found) and breaks all AgentCore chat.
+  # Keeping it as an env reference also avoids committing the real master key to the repo.
+  master_key: os.environ/LITELLM_MASTER_KEY
+  store_model_in_db: true
+litellm_settings:
+  drop_params: true
+
+db_managed_routes:
+  deepseek-v4.1-flash:
+    source_alias: deepseek-v4-flash
+    model: dashscope/deepseek-v4.1-flash
+    model_info:
+      health_check_max_tokens: 16
+      litellm_provider: dashscope
+      mode: chat
+      max_input_tokens: 1048576
+      input_cost_per_token: 4.5e-07
+      cache_read_input_token_cost: 3.6e-08
+      output_cost_per_token: 1.8e-06
+      cache_creation_input_token_cost: 0.0
+      disable_health_check: true
+  glm-5.3-flash:
+    source_alias: deepseek-v4-flash
+    model: dashscope/ZHIPU/GLM-5.3-Flash
+    model_info:
+      mode: chat
+      max_input_tokens: 1048576
+      max_output_tokens: 131072
+      input_cost_per_token: 7.777777777777778e-08
+      cache_read_input_token_cost: 2.2361111111111112e-08
+      cache_creation_input_token_cost: 7.777777777777778e-08
+      output_cost_per_token: 2.722222222222222e-07
+      litellm_provider: dashscope
+      disable_health_check: true
+
+# 已授权的 Claude 请求预判受管透传；复用命名凭据 typesafe-jev。
+jev_passthrough:
+  enabled: true

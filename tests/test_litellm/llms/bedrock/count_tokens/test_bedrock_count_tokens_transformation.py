@@ -36,6 +36,75 @@ def test_transform_anthropic_to_bedrock_request():
     assert "messages" in result["input"]["converse"]
 
 
+def test_transform_omits_empty_messages_and_converts_anthropic_image():
+    """Test that empty history turns are not sent to Bedrock CountTokens."""
+    config = BedrockCountTokensConfig()
+
+    request = {
+        "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "AA==",
+                        },
+                    }
+                ],
+            },
+            {"role": "assistant", "content": []},
+            {"role": "user", "content": None},
+        ],
+    }
+
+    result = config.transform_anthropic_to_bedrock_count_tokens(request)
+
+    messages = result["input"]["converse"]["messages"]
+    assert len(messages) == 1
+    assert messages[0] == {
+        "role": "user",
+        "content": [
+            {
+                "image": {
+                    "format": "png",
+                    "source": {"bytes": "AA=="},
+                }
+            }
+        ],
+    }
+
+
+def test_transform_future_content_block_counts_text_instead_of_passing_type():
+    """Test best-effort text extraction for unknown future content blocks."""
+    config = BedrockCountTokensConfig()
+
+    request = {
+        "model": "anthropic.claude-3-sonnet-20240229-v1:0",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "future_result",
+                        "title": "Future block",
+                        "content": "Readable text",
+                        "source": {"data": "opaque"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = config.transform_anthropic_to_bedrock_count_tokens(request)
+
+    messages = result["input"]["converse"]["messages"]
+    assert messages[0]["content"] == [{"text": "Readable text\nFuture block"}]
+
+
 def test_transform_includes_system_prompt():
     """Test that system prompt is included in Bedrock converse format."""
     config = BedrockCountTokensConfig()
@@ -60,7 +129,10 @@ def test_transform_includes_system_prompt_as_list():
     request = {
         "model": "anthropic.claude-3-sonnet-20240229-v1:0",
         "messages": [{"role": "user", "content": "Hello"}],
-        "system": [{"type": "text", "text": "Block 1"}, {"type": "text", "text": "Block 2"}],
+        "system": [
+            {"type": "text", "text": "Block 1"},
+            {"type": "text", "text": "Block 2"},
+        ],
     }
 
     result = config.transform_anthropic_to_bedrock_count_tokens(request)
@@ -109,7 +181,11 @@ def test_transform_includes_system_and_tools_together():
         "messages": [{"role": "user", "content": "Hello"}],
         "system": "Be helpful",
         "tools": [
-            {"name": "my_tool", "description": "A tool", "input_schema": {"type": "object", "properties": {}}},
+            {
+                "name": "my_tool",
+                "description": "A tool",
+                "input_schema": {"type": "object", "properties": {}},
+            },
         ],
     }
 
@@ -145,12 +221,18 @@ def test_tool_name_sanitization():
         "model": "anthropic.claude-3-sonnet-20240229-v1:0",
         "messages": [{"role": "user", "content": "Hello"}],
         "tools": [
-            {"name": "my-tool!", "description": "A tool", "input_schema": {"type": "object", "properties": {}}},
+            {
+                "name": "my-tool!",
+                "description": "A tool",
+                "input_schema": {"type": "object", "properties": {}},
+            },
         ],
     }
 
     result = config.transform_anthropic_to_bedrock_count_tokens(request)
 
-    tool_name = result["input"]["converse"]["toolConfig"]["tools"][0]["toolSpec"]["name"]
+    tool_name = result["input"]["converse"]["toolConfig"]["tools"][0]["toolSpec"][
+        "name"
+    ]
     # Should be sanitized: only [a-zA-Z0-9_]
     assert tool_name == "my_tool_"

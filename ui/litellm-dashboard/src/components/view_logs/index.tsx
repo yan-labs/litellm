@@ -15,7 +15,7 @@ import { KeyResponse, Team } from "../key_team_helpers/key_list";
 import { PaginatedKeyAliasSelect } from "../KeyAliasSelect/PaginatedKeyAliasSelect/PaginatedKeyAliasSelect";
 import { PaginatedModelSelect } from "../ModelSelect/PaginatedModelSelect/PaginatedModelSelect";
 import FilterComponent, { FilterOption } from "../molecules/filter";
-import { allEndUsersCall, keyInfoV1Call, uiSpendLogsCall } from "../networking";
+import { allEndUsersCall, allTagNamesCall, keyInfoV1Call, uiSpendLogsCall } from "../networking";
 import KeyInfoView from "../templates/key_info_view";
 import AuditLogs from "./audit_logs";
 import { createColumns, LogEntry, type LogsSortField } from "./columns";
@@ -439,6 +439,22 @@ export default function SpendLogsTable({
         const users = data?.map((u: any) => u.user_id) || [];
         const filtered = users.filter((u: string) => u.toLowerCase().includes(searchText.toLowerCase()));
         return filtered.map((u: string) => ({ label: u, value: u }));
+      },
+    },
+    {
+      name: "Tag",
+      label: "Tag",
+      isSearchable: true,
+      searchFn: async (searchText: string) => {
+        if (!accessToken) return [];
+        const data = await allTagNamesCall(accessToken);
+        const tagNames: string[] = Array.from(
+          new Set((data?.tag_names || []).filter((tag: unknown): tag is string => typeof tag === "string")),
+        );
+        const filtered = searchText
+          ? tagNames.filter((tag) => tag.toLowerCase().includes(searchText.toLowerCase()))
+          : tagNames;
+        return filtered.slice(0, 100).map((tag) => ({ label: tag, value: tag }));
       },
     },
     {

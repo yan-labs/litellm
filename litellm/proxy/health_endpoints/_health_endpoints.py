@@ -40,6 +40,40 @@ from litellm.secret_managers.main import get_secret
 
 #### Health ENDPOINTS ####
 
+_CREDENTIAL_MANAGED_LITELLM_PARAMS = {
+    "api_key",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
+    "aws_web_identity_token",
+    "aws_region_name",
+}
+
+
+def _get_model_info_value(model_info: object, key: str) -> Optional[str]:
+    if isinstance(model_info, dict):
+        value = model_info.get(key)
+    else:
+        value = getattr(model_info, key, None)
+    return value if isinstance(value, str) else None
+
+
+def _get_deployment_model_id(deployment: dict) -> Optional[str]:
+    return _get_model_info_value(deployment.get("model_info") or {}, "id")
+
+
+def _deployment_matches_requested_provider(
+    deployment: dict, request_litellm_params: dict
+) -> bool:
+    request_provider = request_litellm_params.get("custom_llm_provider")
+    if not request_provider:
+        return True
+
+    deployment_provider = (deployment.get("litellm_params") or {}).get(
+        "custom_llm_provider"
+    )
+    return deployment_provider in (None, request_provider)
+
 
 def _resolve_os_environ_variables(params: dict) -> dict:
     """
@@ -1509,7 +1543,11 @@ async def test_model_connection(
             )
 
         # Get model name from litellm_params
-        request_litellm_params = litellm_params or {}
+        request_litellm_params = {
+            k: v for k, v in (litellm_params or {}).items() if v is not None
+        }
+        if request_litellm_params.get("vector_store_ids") == []:
+            request_litellm_params.pop("vector_store_ids", None)
         model_name = request_litellm_params.get("model")
 
         # Look up model configuration from router if model name is provided
@@ -1517,8 +1555,26 @@ async def test_model_connection(
         config_litellm_params: dict = {}
         if model_name and llm_router is not None:
             try:
+                deployments = []
+                model_id = _get_model_info_value(model_info or {}, "id")
+                if model_id:
+                    all_deployments = llm_router.get_model_list(model_name=None)
+                    deployments = [
+                        deployment
+                        for deployment in all_deployments or []
+                        if _get_deployment_model_id(deployment) == model_id
+                    ]
+
                 # First try to find by proxy model_name (e.g., "gpt-4o")
-                deployments = llm_router.get_model_list(model_name=model_name)
+                if not deployments:
+                    deployments = llm_router.get_model_list(model_name=model_name)
+                    deployments = [
+                        deployment
+                        for deployment in deployments or []
+                        if _deployment_matches_requested_provider(
+                            deployment, request_litellm_params
+                        )
+                    ]
 
                 # If not found, try to find by litellm model name (e.g., "azure/gpt-4o")
                 if not deployments or len(deployments) == 0:
@@ -1528,6 +1584,9 @@ async def test_model_connection(
                             if (
                                 deployment.get("litellm_params", {}).get("model")
                                 == model_name
+                                and _deployment_matches_requested_provider(
+                                    deployment, request_litellm_params
+                                )
                             ):
                                 deployments = [deployment]
                                 break
@@ -1546,7 +1605,13 @@ async def test_model_connection(
 
         # Merge: config params (from proxy config) as base, request params override
         # This allows users to override specific params while using config for credentials
+        if request_litellm_params.get("litellm_credential_name"):
+            for key in _CREDENTIAL_MANAGED_LITELLM_PARAMS:
+                if key not in request_litellm_params:
+                    config_litellm_params.pop(key, None)
         merged_litellm_params = {**config_litellm_params, **request_litellm_params}
+        if merged_litellm_params.get("vector_store_ids") == []:
+            merged_litellm_params.pop("vector_store_ids", None)
 
         # Resolve os.environ/ environment variables in any remaining request params
         # This handles cases where user explicitly passes os.environ/ values to override config

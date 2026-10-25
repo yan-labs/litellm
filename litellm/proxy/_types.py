@@ -1,3 +1,7 @@
+"""Gateway schemas and error envelopes shared by auth, API routes and streams.
+
+Trusted refusal envelopes preserve stable reasons and real provider usage.
+"""
 import enum
 import json
 from datetime import datetime
@@ -289,6 +293,18 @@ class LiteLLMRoutes(enum.Enum):
         "/v1/videos/{video_id}/content",
         "/videos/{video_id}/remix",
         "/v1/videos/{video_id}/remix",
+        # Kollab-managed Tripo 3D (litellm/proxy/tripo_3d_endpoints). Listed here so
+        # ordinary virtual keys pass route auth; unlisted custom routes are
+        # proxy-admin-only. The handlers still enforce the tripo-3d model allowlist.
+        "/v1/3d/tasks",
+        "/v1/3d/files",
+        "/v1/3d/tasks/{task_id}",
+        # Kollab-managed MiniMax Music (litellm/proxy/minimax_music_endpoints).
+        "/v1/music/generations",
+        # Kollab-managed Kling V3 via OpenRouter (litellm/proxy/kling_video_endpoints).
+        "/v1/kling/videos",
+        "/v1/kling/videos/{video_id}",
+        "/v1/kling/videos/{video_id}/content",
         # audio transcription
         "/audio/transcriptions",
         "/v1/audio/transcriptions",
@@ -3403,7 +3419,11 @@ class ProxyException(Exception):
             self.code = "401"
 
     def to_dict(self) -> dict:
-        """Converts the ProxyException instance to a dictionary."""
+        """Serialize errors; trusted terminal refusal carries protocol reason and usage.
+
+        HTTP status stays in self.code for exception handlers. Only the explicit
+        refusal whitelist uses openai_code on the wire and projects real usage.
+        """
         error_dict: Dict[str, Optional[Union[str, Dict]]] = {
             "message": self.message,
             "type": self.type,
@@ -3412,6 +3432,10 @@ class ProxyException(Exception):
         }
         if self.provider_specific_fields:
             error_dict["provider_specific_fields"] = self.provider_specific_fields
+        if self.type in ("upstream_model_refusal", "model_denylisted"):
+            error_dict["code"] = self.openai_code
+            if self.provider_specific_fields and "usage" in self.provider_specific_fields:
+                error_dict["usage"] = self.provider_specific_fields["usage"]
         return error_dict
 
 

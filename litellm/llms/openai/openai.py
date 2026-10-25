@@ -37,6 +37,11 @@ from litellm.litellm_core_utils.logging_utils import track_llm_api_timing
 from litellm.llms.base_llm.base_model_iterator import BaseModelResponseIterator
 from litellm.llms.base_llm.chat.transformation import BaseConfig, BaseLLMException
 from litellm.llms.bedrock.chat.invoke_handler import MockResponseIterator
+from litellm.llms.openrouter.audio_catalog import (
+    is_openrouter_api_base,
+    validate_audio_model,
+    validate_audio_model_async,
+)
 from litellm.types.utils import (
     EmbeddingResponse,
     ImageResponse,
@@ -1569,6 +1574,9 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
             shared_session=shared_session,
         )
 
+        if is_openrouter_api_base(api_base):
+            validate_audio_model(model, "speech")
+
         response = cast(OpenAI, openai_client).audio.speech.create(
             model=model,
             voice=voice,  # type: ignore
@@ -1604,6 +1612,9 @@ class OpenAIChatCompletion(BaseLLM, BaseOpenAILLM):
                 shared_session=shared_session,
             ),
         )
+
+        if is_openrouter_api_base(api_base):
+            await validate_audio_model_async(model, "speech")
 
         response = await openai_client.audio.speech.create(
             model=model,

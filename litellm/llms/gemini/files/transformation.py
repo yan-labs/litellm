@@ -85,7 +85,7 @@ class GoogleAIStudioFilesHandler(GeminiModelInfo, BaseFilesConfig):
         if not final_api_key:
             raise ValueError("api_key is required")
 
-        url = "{}/{}?key={}".format(api_base, endpoint, final_api_key)
+        url = "{}/{}".format(api_base, endpoint)
         return url
 
     def get_supported_openai_params(
@@ -216,6 +216,7 @@ class GoogleAIStudioFilesHandler(GeminiModelInfo, BaseFilesConfig):
         if not api_key:
             raise ValueError("api_key is required")
 
+<<<<<<< HEAD
         if file_id.startswith("http"):
             url = "{}?key={}".format(file_id, api_key)
         else:
@@ -226,8 +227,19 @@ class GoogleAIStudioFilesHandler(GeminiModelInfo, BaseFilesConfig):
             )
             api_base = api_base.rstrip("/")
             url = "{}/v1beta/{}?key={}".format(api_base, file_id, api_key)
+=======
+        file_part = self._normalize_gemini_file_id(file_id)
 
-        # Return empty params dict - API key is already in URL, no query params needed
+        api_base = (
+            self.get_api_base(litellm_params.get("api_base"))
+            or "https://generativelanguage.googleapis.com"
+        )
+        api_base = api_base.rstrip("/")
+
+        url = f"{api_base}/v1beta/{file_part}"
+>>>>>>> 25f93bed91 (security: prevent API key leaks in error tracebacks, logs, and alerts)
+
+        # API key is passed via x-goog-api-key header (set in validate_environment)
         return url, {}
 
     def transform_retrieve_file_response(

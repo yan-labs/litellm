@@ -14,6 +14,7 @@ from litellm.proxy.common_request_processing import (
     create_response,
 )
 from litellm.proxy.common_utils.http_parsing_utils import _read_request_body
+from litellm.proxy.kollab_latency_debug import latency_now, log_latency_stage
 from litellm.types.utils import TokenCountResponse
 
 router = APIRouter()
@@ -34,6 +35,7 @@ async def anthropic_response(  # noqa: PLR0915
 
     This was a BETA endpoint that calls 100+ LLMs in the anthropic format.
     """
+    endpoint_started_at = latency_now()
     from litellm.proxy.proxy_server import (
         general_settings,
         llm_router,
@@ -48,6 +50,15 @@ async def anthropic_response(  # noqa: PLR0915
     )
 
     data = await _read_request_body(request=request)
+    log_latency_stage(
+        "endpoint_body_read",
+        started_at=endpoint_started_at,
+        total_started_at=endpoint_started_at,
+        data=data,
+        request=request,
+        route_type="anthropic_messages",
+        details={"content_length": request.headers.get("content-length", "")},
+    )
     base_llm_response_processor = ProxyBaseLLMRequestProcessing(data=data)
     try:
         result = await base_llm_response_processor.base_process_llm_request(

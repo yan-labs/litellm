@@ -512,8 +512,268 @@ async def test_test_model_connection_loads_config_from_router():
         assert model_params.get("model") == "gpt-4o"  # Request param overrides config param
         
         # Verify result
-        assert result["status"] == "success"
-        assert "result" in result
+    assert result["status"] == "success"
+    assert "result" in result
+
+
+@pytest.mark.asyncio
+async def test_test_model_connection_prefers_model_id_over_colliding_model_name():
+    """
+    Model detail tests send the provider model name. If another deployment uses
+    that same value as its public model name, prefer the exact model id so
+    credentials and vector-store settings do not leak across deployments.
+    """
+    mock_request = MagicMock()
+    mock_user_api_key_dict = MagicMock()
+    mock_user_api_key_dict.user_id = "test-user"
+    mock_user_api_key_dict.token = "test-token"
+    mock_prisma_client = MagicMock()
+
+    openrouter_deployment = {
+        "model_name": "global.anthropic.claude-sonnet-4-6",
+        "litellm_params": {
+            "model": "openrouter/anthropic/claude-sonnet-4.6",
+            "custom_llm_provider": "openrouter",
+            "api_key": "openrouter-api-key",
+            "vector_store_ids": ["vs_wrong"],
+        },
+        "model_info": {"id": "openrouter-id"},
+    }
+    bedrock_deployment = {
+        "model_name": "old.global.anthropic.claude-sonnet-4-6",
+        "litellm_params": {
+            "model": "global.anthropic.claude-sonnet-4-6",
+            "custom_llm_provider": "bedrock",
+            "litellm_credential_name": "bedrock-3",
+        },
+        "model_info": {"id": "bedrock-id"},
+    }
+
+    mock_router = MagicMock()
+
+    def get_model_list(model_name=None):
+        if model_name is None:
+            return [openrouter_deployment, bedrock_deployment]
+        if model_name == "global.anthropic.claude-sonnet-4-6":
+            return [openrouter_deployment]
+        return []
+
+    mock_router.get_model_list.side_effect = get_model_list
+
+    mock_health_check_result = {"status": "healthy"}
+    mock_ahealth_check = AsyncMock(return_value=mock_health_check_result)
+    mock_run_with_timeout = AsyncMock(return_value=mock_health_check_result)
+
+    with patch(
+        "litellm.proxy.proxy_server.prisma_client",
+        mock_prisma_client,
+    ), patch(
+        "litellm.proxy.proxy_server.llm_router",
+        mock_router,
+    ), patch(
+        "litellm.proxy.proxy_server.premium_user",
+        False,
+    ), patch(
+        "litellm.proxy.management_endpoints.model_management_endpoints.ModelManagementAuthChecks.can_user_make_model_call",
+        AsyncMock(),
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints.litellm.ahealth_check",
+        mock_ahealth_check,
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints.run_with_timeout",
+        mock_run_with_timeout,
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints._update_litellm_params_for_health_check",
+        lambda model_info, litellm_params: litellm_params.copy(),
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints._resolve_os_environ_variables",
+        lambda params: params,
+    ):
+        result = await health_test_model_connection(
+            request=mock_request,
+            mode="chat",
+            litellm_params={
+                "model": "global.anthropic.claude-sonnet-4-6",
+                "custom_llm_provider": "bedrock",
+                "litellm_credential_name": "bedrock-3",
+            },
+            model_info={"id": "bedrock-id", "mode": "chat"},
+            user_api_key_dict=mock_user_api_key_dict,
+        )
+
+    model_params = mock_ahealth_check.call_args.kwargs.get("model_params", {})
+    assert result["status"] == "success"
+    assert model_params.get("custom_llm_provider") == "bedrock"
+    assert model_params.get("litellm_credential_name") == "bedrock-3"
+    assert model_params.get("model") == "global.anthropic.claude-sonnet-4-6"
+    assert "api_key" not in model_params
+    assert "vector_store_ids" not in model_params
+
+
+@pytest.mark.asyncio
+async def test_test_model_connection_filters_colliding_model_name_by_provider():
+    """
+    Older dashboard builds do not pass a model id. In that case, a Bedrock test
+    should not inherit config from an OpenRouter deployment whose public name
+    equals the Bedrock provider model name.
+    """
+    mock_request = MagicMock()
+    mock_user_api_key_dict = MagicMock()
+    mock_user_api_key_dict.user_id = "test-user"
+    mock_user_api_key_dict.token = "test-token"
+    mock_prisma_client = MagicMock()
+
+    openrouter_deployment = {
+        "model_name": "global.anthropic.claude-sonnet-4-6",
+        "litellm_params": {
+            "model": "openrouter/anthropic/claude-sonnet-4.6",
+            "custom_llm_provider": "openrouter",
+            "api_key": "openrouter-api-key",
+            "vector_store_ids": ["vs_wrong"],
+        },
+        "model_info": {"id": "openrouter-id"},
+    }
+    bedrock_deployment = {
+        "model_name": "old.global.anthropic.claude-sonnet-4-6",
+        "litellm_params": {
+            "model": "global.anthropic.claude-sonnet-4-6",
+            "custom_llm_provider": "bedrock",
+            "litellm_credential_name": "bedrock-3",
+        },
+        "model_info": {"id": "bedrock-id"},
+    }
+
+    mock_router = MagicMock()
+
+    def get_model_list(model_name=None):
+        if model_name is None:
+            return [openrouter_deployment, bedrock_deployment]
+        if model_name == "global.anthropic.claude-sonnet-4-6":
+            return [openrouter_deployment]
+        return []
+
+    mock_router.get_model_list.side_effect = get_model_list
+
+    mock_ahealth_check = AsyncMock(return_value={"status": "healthy"})
+    mock_run_with_timeout = AsyncMock(return_value={"status": "healthy"})
+
+    with patch(
+        "litellm.proxy.proxy_server.prisma_client",
+        mock_prisma_client,
+    ), patch(
+        "litellm.proxy.proxy_server.llm_router",
+        mock_router,
+    ), patch(
+        "litellm.proxy.proxy_server.premium_user",
+        False,
+    ), patch(
+        "litellm.proxy.management_endpoints.model_management_endpoints.ModelManagementAuthChecks.can_user_make_model_call",
+        AsyncMock(),
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints.litellm.ahealth_check",
+        mock_ahealth_check,
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints.run_with_timeout",
+        mock_run_with_timeout,
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints._update_litellm_params_for_health_check",
+        lambda model_info, litellm_params: litellm_params.copy(),
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints._resolve_os_environ_variables",
+        lambda params: params,
+    ):
+        await health_test_model_connection(
+            request=mock_request,
+            mode="chat",
+            litellm_params={
+                "model": "global.anthropic.claude-sonnet-4-6",
+                "custom_llm_provider": "bedrock",
+                "litellm_credential_name": "bedrock-3",
+            },
+            model_info={},
+            user_api_key_dict=mock_user_api_key_dict,
+        )
+
+    model_params = mock_ahealth_check.call_args.kwargs.get("model_params", {})
+    assert model_params.get("custom_llm_provider") == "bedrock"
+    assert model_params.get("litellm_credential_name") == "bedrock-3"
+    assert "api_key" not in model_params
+    assert "vector_store_ids" not in model_params
+
+
+@pytest.mark.asyncio
+async def test_test_model_connection_ignores_null_and_empty_overrides():
+    """
+    UI connection tests can send null fields from forms. They should not clear
+    router-loaded credentials, and empty vector_store_ids should remain a no-op.
+    """
+    mock_request = MagicMock()
+    mock_user_api_key_dict = MagicMock()
+    mock_user_api_key_dict.user_id = "test-user"
+    mock_user_api_key_dict.token = "test-token"
+    mock_prisma_client = MagicMock()
+
+    mock_router = MagicMock()
+    mock_router.get_model_list.return_value = [
+        {
+            "model_name": "bedrock-model",
+            "litellm_params": {
+                "model": "global.anthropic.claude-sonnet-4-6",
+                "custom_llm_provider": "bedrock",
+                "litellm_credential_name": "bedrock-3",
+                "vector_store_ids": [],
+            },
+            "model_info": {},
+        }
+    ]
+
+    mock_health_check_result = {"status": "healthy"}
+    mock_ahealth_check = AsyncMock(return_value=mock_health_check_result)
+    mock_run_with_timeout = AsyncMock(return_value=mock_health_check_result)
+
+    def mock_update_params(model_info, litellm_params):
+        return litellm_params.copy()
+
+    with patch(
+        "litellm.proxy.proxy_server.prisma_client",
+        mock_prisma_client,
+    ), patch(
+        "litellm.proxy.proxy_server.llm_router",
+        mock_router,
+    ), patch(
+        "litellm.proxy.proxy_server.premium_user",
+        False,
+    ), patch(
+        "litellm.proxy.management_endpoints.model_management_endpoints.ModelManagementAuthChecks.can_user_make_model_call",
+        AsyncMock(),
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints.litellm.ahealth_check",
+        mock_ahealth_check,
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints.run_with_timeout",
+        mock_run_with_timeout,
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints._update_litellm_params_for_health_check",
+        mock_update_params,
+    ), patch(
+        "litellm.proxy.health_endpoints._health_endpoints._resolve_os_environ_variables",
+        lambda params: params,
+    ):
+        await health_test_model_connection(
+            request=mock_request,
+            mode="chat",
+            litellm_params={
+                "model": "bedrock-model",
+                "litellm_credential_name": None,
+                "vector_store_ids": [],
+            },
+            model_info={},
+            user_api_key_dict=mock_user_api_key_dict,
+        )
+
+    model_params = mock_ahealth_check.call_args.kwargs.get("model_params", {})
+    assert model_params.get("litellm_credential_name") == "bedrock-3"
+    assert "vector_store_ids" not in model_params
 
 
 @pytest.mark.asyncio

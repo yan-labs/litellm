@@ -341,6 +341,7 @@ class AnthropicChatCompletion(BaseLLM):
             messages=messages,
             optional_params={**optional_params, "is_vertex_request": is_vertex_request},
             litellm_params=litellm_params,
+            api_base=api_base,
         )
 
         config = ProviderConfigManager.get_provider_chat_config(
@@ -1245,7 +1246,11 @@ class ModelResponseIterator:
             str_line = str_line[index:]
 
         if str_line.startswith("data:"):
-            data_json = json.loads(str_line[5:])
+            payload = str_line[5:].strip()
+            # OpenRouter 等上游的 Anthropic 兼容流以 data: [DONE] 结尾，不是 JSON。
+            if payload == "" or payload == "[DONE]":
+                return ModelResponseStream(id=self.response_id)
+            data_json = json.loads(payload)
             return self.chunk_parser(chunk=data_json)
         else:
             return ModelResponseStream(id=self.response_id)

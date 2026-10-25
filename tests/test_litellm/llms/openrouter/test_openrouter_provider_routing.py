@@ -79,6 +79,29 @@ class TestOpenRouterNativeModelRouting:
     @pytest.mark.parametrize(
         "input_model,expected_model",
         [
+            ("openrouter/moonshotai/kimi-k2.5", "moonshotai/kimi-k2.5"),
+            ("openrouter/anthropic/claude-3.5-sonnet", "anthropic/claude-3.5-sonnet"),
+        ],
+    )
+    def test_provider_prefixed_openrouter_models_strip_outer_prefix_on_second_call(
+        self, input_model, expected_model
+    ):
+        """Models stored as openrouter/<provider>/<model> should strip once.
+
+        This covers proxy/UI flows where the saved model already includes the
+        OpenRouter provider prefix and the runtime also passes
+        custom_llm_provider="openrouter".
+        """
+        model_second, provider2, _, _ = litellm.get_llm_provider(
+            model=input_model,
+            custom_llm_provider="openrouter",
+        )
+        assert provider2 == "openrouter"
+        assert model_second == expected_model
+
+    @pytest.mark.parametrize(
+        "input_model,expected_model",
+        [
             ("openrouter/anthropic/claude-3-haiku", "anthropic/claude-3-haiku"),
             ("openrouter/meta-llama/llama-3-70b-instruct", "meta-llama/llama-3-70b-instruct"),
         ],

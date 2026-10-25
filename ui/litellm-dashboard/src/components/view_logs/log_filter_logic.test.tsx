@@ -108,6 +108,7 @@ describe("useLogFilterLogic", () => {
     expect(filters["Model"]).toBe("");
     expect(filters["User ID"]).toBe("");
     expect(filters["End User"]).toBe("");
+    expect(filters["Tag"]).toBe("");
     expect(filters["Status"]).toBe("");
     expect(filters["Key Alias"]).toBe("");
     expect(filters["Error Code"]).toBe("");
@@ -243,6 +244,29 @@ describe("useLogFilterLogic", () => {
       () => {
         expect(result.current.filteredLogs.data).toHaveLength(1);
         expect(result.current.filteredLogs.data[0].end_user).toBe("user-a");
+      },
+      { timeout: 500 },
+    );
+  });
+
+  it("should call uiSpendLogsCall with request_tag when Tag filter is set", async () => {
+    vi.mocked(uiSpendLogsCall).mockResolvedValue(
+      createPaginatedResponse([createLogEntry()]),
+    );
+    const logs = createPaginatedResponse([createLogEntry()]);
+    const { result } = renderHook(() => useLogFilterLogic({ ...defaultProps, logs }), { wrapper });
+
+    act(() => {
+      result.current.handleFilterChange({ Tag: "conversation:abc123" });
+    });
+
+    await waitFor(
+      () => {
+        expect(uiSpendLogsCall).toHaveBeenCalledWith(
+          expect.objectContaining({
+            params: expect.objectContaining({ request_tag: "conversation:abc123" }),
+          }),
+        );
       },
       { timeout: 500 },
     );

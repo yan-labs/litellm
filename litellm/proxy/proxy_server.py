@@ -1,3 +1,8 @@
+"""LiteLLM gateway ASGI application, lifecycle and managed API registration.
+
+Includes the authenticated JEV judgment route; its TEST opt-in and named
+credential are owned by the gateway, never the Kollab server.
+"""
 import asyncio
 import copy
 import enum
@@ -232,6 +237,13 @@ from litellm.litellm_core_utils.credential_accessor import CredentialAccessor
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
 from litellm.litellm_core_utils.sensitive_data_masker import SensitiveDataMasker
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
+from litellm.llms.openrouter.audio_catalog import (
+    OpenRouterAudioCatalogError,
+    OpenRouterAudioModelError,
+    resolve_audio_media_type,
+    resolve_managed_audio_alias,
+    validate_managed_audio_request,
+)
 from litellm.llms.vertex_ai.vertex_llm_base import VertexBase
 from litellm.proxy._experimental.mcp_server.byok_oauth_endpoints import (
     router as mcp_byok_oauth_router,
@@ -497,6 +509,7 @@ from litellm.proxy.utils import (
     _get_docs_url,
     _get_projected_spend_over_limit,
     _get_redoc_url,
+    _get_openapi_url,
     _is_projected_spend_over_limit,
     _is_valid_team_configs,
     get_custom_url,
@@ -518,6 +531,13 @@ from litellm.proxy.vertex_ai_endpoints.langfuse_endpoints import (
     router as langfuse_router,
 )
 from litellm.proxy.video_endpoints.endpoints import router as video_router
+from litellm.proxy.tripo_3d_endpoints.endpoints import router as tripo_3d_router
+from litellm.proxy.minimax_music_endpoints.endpoints import (
+    router as minimax_music_router,
+)
+from litellm.proxy.volcano_audio_endpoints.endpoints import router as volcano_audio_router
+from litellm.proxy.kling_video_endpoints.endpoints import router as kling_video_router
+from litellm.proxy.happy_horse_video_endpoints.endpoints import router as happy_horse_video_router
 from litellm.router import (
     AssistantsTypedDict,
     Deployment,
@@ -7423,6 +7443,12 @@ async def audio_speech(
         # Use orjson to parse JSON data, orjson speeds up requests significantly
         body = await request.body()
         data = orjson.loads(body)
+        try:
+            await validate_managed_audio_request(data)
+        except OpenRouterAudioModelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OpenRouterAudioCatalogError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         # Include original request and headers in the data
         data = await add_litellm_data_to_request(
@@ -7483,17 +7509,18 @@ async def audio_speech(
             hidden_params=hidden_params,
         )
 
-        # Determine media type based on model type
-        media_type = "audio/mpeg"  # Default for OpenAI TTS
-        request_model = data.get("model", "")
-        if request_model:
-            request_model_lower = request_model.lower()
-            if "gemini" in request_model_lower and (
-                "tts" in request_model_lower or "preview-tts" in request_model_lower
-            ):
-                media_type = (
-                    "audio/wav"  # Gemini TTS returns WAV format after conversion
-                )
+        # Prefer the provider's content type so PCM/WAV bytes are never labelled MP3.
+        upstream_response = getattr(response, "response", None)
+        upstream_headers = getattr(upstream_response, "headers", {})
+        requested_format = data.get("response_format")
+        resolved_audio = resolve_managed_audio_alias(data.get("model"))
+        if requested_format is None:
+            requested_format = (
+                "pcm" if resolved_audio and resolved_audio[1] == "speech" else "mp3"
+            )
+        media_type = resolve_audio_media_type(
+            upstream_headers.get("content-type"), requested_format
+        )
 
         return StreamingResponse(
             _audio_speech_chunk_generator(response),  # type: ignore[arg-type]
@@ -7543,6 +7570,12 @@ async def audio_transcriptions(
         # Use orjson to parse JSON data, orjson speeds up requests significantly
         form_data = await get_form_data(request)
         data = {key: value for key, value in form_data.items() if key != "file"}
+        try:
+            await validate_managed_audio_request(data)
+        except OpenRouterAudioModelError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except OpenRouterAudioCatalogError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
 
         # Include original request and headers in the data
         data = await add_litellm_data_to_request(
@@ -13462,6 +13495,11 @@ app.include_router(rerank_router)
 app.include_router(ocr_router)
 app.include_router(rag_router)
 app.include_router(video_router)
+app.include_router(tripo_3d_router)
+app.include_router(minimax_music_router)
+app.include_router(volcano_audio_router)
+app.include_router(kling_video_router)
+app.include_router(happy_horse_video_router)
 app.include_router(container_router)
 app.include_router(search_router)
 app.include_router(image_router)
@@ -13470,6 +13508,8 @@ app.include_router(vector_store_router)
 app.include_router(vector_store_management_router)
 app.include_router(vector_store_files_router)
 app.include_router(credential_router)
+from litellm.proxy.pass_through_endpoints.jev import router as jev_router
+app.include_router(jev_router)
 app.include_router(llm_passthrough_router)
 app.include_router(webrtc_router)
 app.include_router(mcp_management_router)

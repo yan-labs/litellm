@@ -1468,6 +1468,7 @@ def convert_to_gemini_tool_call_invoke(
 def convert_to_gemini_tool_call_result(  # noqa: PLR0915
     message: Union[ChatCompletionToolMessage, ChatCompletionFunctionMessage],
     last_message_with_tool_calls: Optional[dict],
+    model: Optional[str] = None,
 ) -> Union[VertexPartType, List[VertexPartType]]:
     """
     OpenAI message with a tool result looks like:
@@ -1643,11 +1644,11 @@ def convert_to_gemini_tool_call_result(  # noqa: PLR0915
     # Create part with function_response, and optionally inline_data for images (Computer Use)
     _part: VertexPartType = {"function_response": _function_response}
 
-    # For Computer Use, if we have images/files, we need separate parts:
-    # - One part with function_response
-    # - One part per inline_data item
-    # Gemini's PartType is a oneof, so we can't have both in the same part
+    # Gemini 3 nests media in the function response; older models use sibling parts.
     if inline_data_list:
+        if model and litellm.VertexGeminiConfig._is_gemini_3_or_newer(model):
+            _function_response["parts"] = [{"inline_data": d} for d in inline_data_list]
+            return _part
         return [_part] + [{"inline_data": d} for d in inline_data_list]
 
     return _part
@@ -5142,26 +5143,44 @@ def _bedrock_tools_pt(tools: List) -> List[BedrockToolBlock]:
         }
     ]
     """
+    from litellm.llms.bedrock.common_utils import (
+        normalize_json_schema_custom_types_to_object,
+    )
     from litellm.litellm_core_utils.prompt_templates.common_utils import unpack_defs
 
+    _valid_json_schema_root_types = frozenset(
+        ("array", "boolean", "integer", "null", "number", "object", "string")
+    )
     tool_block_list: List[BedrockToolBlock] = []
-    for tool in tools:
+    for tool_idx, tool in enumerate(tools):
         # Check if tool is already a BedrockToolBlock (e.g., systemTool for Nova grounding)
         if _is_bedrock_tool_block(tool):
             # Already a BedrockToolBlock, pass it through
             tool_block_list.append(tool)  # type: ignore
             continue
 
-        # Handle regular OpenAI-style function tools
-        parameters = tool.get("function", {}).get(
-            "parameters", {"type": "object", "properties": {}}
-        )
-        name = tool.get("function", {}).get("name", "")
+        # OpenAI function tools, or Anthropic Messages / Claude Code ({name, input_schema, type, ...})
+        if isinstance(tool, dict) and "input_schema" in tool and "function" not in tool:
+            parameters = copy.deepcopy(
+                tool.get("input_schema") or {"type": "object", "properties": {}}
+            )
+            raw_name = tool.get("name", "") or ""
+            _tool_description = tool.get("description", None)
+        else:
+            parameters = copy.deepcopy(
+                tool.get("function", {}).get(
+                    "parameters", {"type": "object", "properties": {}}
+                )
+            )
+            raw_name = tool.get("function", {}).get("name", "") or ""
+            _tool_description = tool.get("function", {}).get("description", None)
+
+        if not (raw_name and str(raw_name).strip()):
+            raw_name = f"litellm_unnamed_tool_{tool_idx}"
 
         # related issue: https://github.com/BerriAI/litellm/issues/5007
         # Bedrock tool names must satisfy regular expression pattern: [a-zA-Z][a-zA-Z0-9_]* ensure this is true
-        name = make_valid_bedrock_tool_name(input_tool_name=name)
-        _tool_description = tool.get("function", {}).get("description", None)
+        name = make_valid_bedrock_tool_name(input_tool_name=raw_name)
         if _tool_description:  # bedrock doesn't accept empty "" or None descriptions
             description = _tool_description
         else:
@@ -5174,9 +5193,12 @@ def _bedrock_tools_pt(tools: List) -> List[BedrockToolBlock]:
         # with circular references (see issue #19098). unpack_defs handles nested
         # refs recursively and correctly detects/skips circular references.
         unpack_defs(parameters, defs_copy)
+        normalize_json_schema_custom_types_to_object(parameters)
+        if parameters.get("type") not in _valid_json_schema_root_types:
+            parameters["type"] = "object"
         tool_input_schema = BedrockToolInputSchemaBlock(
             json=BedrockToolJsonSchemaBlock(
-                type=parameters.get("type", ""),
+                type=parameters["type"],
                 properties=parameters.get("properties", {}),
                 required=parameters.get("required", []),
             )

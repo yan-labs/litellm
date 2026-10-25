@@ -1,9 +1,17 @@
+"""Anthropic Messages stream iterator helpers.
+
+Kollab traces this layer to distinguish provider header wait from the first
+actual streaming bytes returned to LiteLLM. The iterator emits only byte counts
+and timing metadata, never provider chunks or prompt text.
+"""
+
 import asyncio
 import json
 from datetime import datetime
 from typing import Any, AsyncIterator, List, Union
 
 from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLoggingObj
+from litellm.proxy.kollab_latency_debug import latency_now, log_latency_stage
 from litellm.proxy.pass_through_endpoints.success_handler import (
     PassThroughEndpointLogging,
 )
@@ -27,6 +35,7 @@ class BaseAnthropicMessagesStreamingIterator:
         self.litellm_logging_obj = litellm_logging_obj
         self.request_body = request_body
         self.start_time = datetime.now()
+        self.latency_started_at = latency_now()
 
     async def _handle_streaming_logging(self, collected_chunks: List[bytes]):
         """Handle the logging after all chunks have been collected."""
@@ -98,11 +107,41 @@ class BaseAnthropicMessagesStreamingIterator:
         This method provides the common logic for both Anthropic and Bedrock implementations.
         """
         collected_chunks = []
+        first_chunk_seen = False
+        stream_started_at = latency_now()
+        log_latency_stage(
+            "stream_iteration_start",
+            started_at=stream_started_at,
+            data=self.request_body,
+            logging_obj=self.litellm_logging_obj,
+            route_type="anthropic_messages",
+        )
 
         async for chunk in completion_stream:
             encoded_chunk = self._convert_chunk_to_sse_format(chunk)
             collected_chunks.append(encoded_chunk)
+            if not first_chunk_seen:
+                first_chunk_seen = True
+                log_latency_stage(
+                    "first_stream_chunk",
+                    started_at=stream_started_at,
+                    data=self.request_body,
+                    logging_obj=self.litellm_logging_obj,
+                    route_type="anthropic_messages",
+                    details={
+                        "chunk_type": type(chunk).__name__,
+                        "encoded_bytes": len(encoded_chunk),
+                    },
+                )
             yield encoded_chunk
 
         # Handle logging after all chunks are processed
+        log_latency_stage(
+            "stream_iteration_finished",
+            started_at=stream_started_at,
+            data=self.request_body,
+            logging_obj=self.litellm_logging_obj,
+            route_type="anthropic_messages",
+            details={"chunk_count": len(collected_chunks)},
+        )
         await self._handle_streaming_logging(collected_chunks)

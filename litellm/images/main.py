@@ -1,3 +1,8 @@
+"""LiteLLM image entry points dispatch managed generation/edit configurations.
+
+Wokey reuses the shared OpenAI HTTP handlers; Kie uses its task executor.
+"""
+
 import asyncio
 import contextvars
 import importlib
@@ -398,6 +403,20 @@ def image_generation(  # noqa: PLR0915
         #########################################################
         # Providers using llm_http_handler
         #########################################################
+        elif custom_llm_provider == "kie":
+            from litellm.llms.kie.task_engine import execute_images
+
+            return execute_images(
+                model=model,
+                prompt=prompt,
+                params=optional_params,
+                litellm_params=litellm_params_dict,
+                api_key=api_key,
+                api_base=api_base,
+                client=client,
+                timeout=timeout,
+                is_async=aimg_generation,
+            )
         elif custom_llm_provider in (
             litellm.LlmProviders.RECRAFT,
             litellm.LlmProviders.AIML,
@@ -407,7 +426,19 @@ def image_generation(  # noqa: PLR0915
             litellm.LlmProviders.RUNWAYML,
             litellm.LlmProviders.VERTEX_AI,
             litellm.LlmProviders.OPENROUTER,
+            litellm.LlmProviders.WOKEY,
         ):
+            if custom_llm_provider == "wokey":
+                # Shared parameter filtering classifies ratio as a LiteLLM control;
+                # preserve Kollab's media fields for the provider's explicit mapper.
+                optional_params.update({key: kwargs[key] for key in ("aspect_ratio", "resolution", "extra_body") if key in kwargs})
+                from litellm.llms.kie.health_check import health_check_context
+                from litellm.llms.wokey.health_check import acheck_catalog, check_catalog
+
+                if health_check_context.get():
+                    # Internal probes read the free catalog, never generate an image.
+                    probe = acheck_catalog if aimg_generation else check_catalog
+                    return probe(api_key or litellm_params_dict.get("api_key"), model, api_base)
             if image_generation_config is None:
                 raise ValueError(
                     f"image generation config is not supported for {custom_llm_provider}"
@@ -424,6 +455,8 @@ def image_generation(  # noqa: PLR0915
                 image_generation_provider_config=image_generation_config,
                 image_generation_optional_request_params=optional_params,
                 custom_llm_provider=custom_llm_provider,
+                # Wokey uses native async HTTP rather than a blocking call in the executor.
+                _is_async=aimg_generation if custom_llm_provider == "wokey" else False,
                 litellm_params=litellm_params_dict,
                 logging_obj=litellm_logging_obj,
                 timeout=timeout,
@@ -892,6 +925,11 @@ def image_edit(  # noqa: PLR0915
             )
         )
 
+        if custom_llm_provider == "wokey":
+            # OpenAI's edit TypedDict drops ratio/resolution; retain Kollab's controls for mapping.
+            image_edit_request_params.update({key: kwargs[key] for key in ("aspect_ratio", "resolution") if key in kwargs})
+            image_edit_request_params.update(extra_body or {})
+
         # Pre Call logging
         litellm_logging_obj.update_from_kwargs(
             kwargs=kwargs,
@@ -958,6 +996,21 @@ def image_edit(  # noqa: PLR0915
                 extra_headers=extra_headers,
                 client=kwargs.get("client"),
                 aimage_edit=_is_async,
+            )
+        if custom_llm_provider == "kie":
+            from litellm.llms.kie.task_engine import execute_images
+
+            return execute_images(
+                model=model,
+                prompt=prompt,
+                params={**image_edit_request_params, **(extra_body or {})},
+                litellm_params=dict(litellm_params),
+                api_key=kwargs.get("api_key"),
+                api_base=kwargs.get("api_base"),
+                client=kwargs.get("client"),
+                timeout=timeout,
+                is_async=_is_async,
+                image=images,
             )
         # Call the handler with _is_async flag instead of directly calling the async handler
         return base_llm_http_handler.image_edit_handler(
@@ -1042,6 +1095,10 @@ async def aimage_edit(
             size=size,
             user=user,
             timeout=timeout,
+            # Keep the async edit contract identical to the sync entry for media controls.
+            extra_headers=extra_headers,
+            extra_query=extra_query,
+            extra_body=extra_body,
             custom_llm_provider=custom_llm_provider,
             **kwargs,
         )

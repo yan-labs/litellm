@@ -1,3 +1,9 @@
+"""Translate messages requests and results for the chat-completions bridge.
+
+The messages handler shares these adapters across sync/async and streaming calls;
+named-tool mappings also restore Anthropic names in returned tool-use blocks.
+"""
+
 import copy
 import hashlib
 import json
@@ -15,6 +21,7 @@ from typing import (
 )
 
 from litellm.llms.anthropic.experimental_pass_through.utils import (
+    extract_cache_tokens,
     is_reasoning_auto_summary_enabled,
 )
 
@@ -762,10 +769,17 @@ class LiteLLMAnthropicMessagesAdapter:
     def translate_anthropic_tool_choice_to_openai(
         self, tool_choice: AnthropicMessagesToolChoice
     ) -> ChatCompletionToolChoiceValues:
+        """Map choice modes for the messages-to-chat request builder.
+
+        Keep named-function nesting and name truncation aligned with chat tools;
+        parallel-tool policy is translated separately on the enclosing request.
+        """
         if tool_choice["type"] == "any":
             return "required"
         elif tool_choice["type"] == "auto":
             return "auto"
+        elif tool_choice["type"] == "none":
+            return "none"
         elif tool_choice["type"] == "tool":
             # Truncate tool name if it exceeds OpenAI's 64-char limit
             original_name = tool_choice.get("name", "")
@@ -796,7 +810,7 @@ class LiteLLMAnthropicMessagesAdapter:
         tool_name_mapping: Dict[str, str] = {}
         mapped_tool_params = ["name", "input_schema", "description", "cache_control"]
 
-        for tool in tools:
+        for idx, tool in enumerate(tools):
             # Check if this is an Anthropic-native tool that should be kept as-is
             tool_type = tool.get("type", "")
             if any(tool_type.startswith(t.value) for t in ANTHROPIC_HOSTED_TOOLS):
@@ -804,7 +818,13 @@ class LiteLLMAnthropicMessagesAdapter:
                 new_tools.append(tool)  # type: ignore[arg-type]
                 continue
 
-            original_name = tool["name"]
+            raw_name = tool.get("name")
+            if raw_name is None or (
+                isinstance(raw_name, str) and not str(raw_name).strip()
+            ):
+                original_name = f"litellm_unnamed_tool_{idx}"
+            else:
+                original_name = str(raw_name)
             truncated_name = truncate_tool_name(original_name)
 
             # Store mapping if name was truncated
@@ -966,7 +986,11 @@ class LiteLLMAnthropicMessagesAdapter:
         anthropic_message_request: AnthropicMessagesRequest,
         new_kwargs: ChatCompletionRequest,
     ) -> None:
-        """Translate Anthropic tool_choice to OpenAI format."""
+        """Set choice and parallel policy for all messages-to-chat handler modes.
+
+        Only invert an explicitly supplied prohibition, so requests without it
+        retain the provider's default parallel-call behavior.
+        """
         if "tool_choice" not in anthropic_message_request:
             return
         tool_choice = anthropic_message_request["tool_choice"]
@@ -975,6 +999,10 @@ class LiteLLMAnthropicMessagesAdapter:
         new_kwargs["tool_choice"] = self.translate_anthropic_tool_choice_to_openai(
             tool_choice=cast(AnthropicMessagesToolChoice, tool_choice)
         )
+        if "disable_parallel_tool_use" in tool_choice:
+            new_kwargs["parallel_tool_calls"] = not tool_choice[
+                "disable_parallel_tool_use"
+            ]
 
     def _translate_tools_to_openai(
         self,
@@ -1188,6 +1216,7 @@ class LiteLLMAnthropicMessagesAdapter:
         choices: List[Choices],
         tool_name_mapping: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
+        """Bridge content and refusal text without discarding provider refusal reasons."""
         new_content: List[Dict[str, Any]] = []
         for choice in choices:
             # Handle thinking blocks first
@@ -1236,6 +1265,9 @@ class LiteLLMAnthropicMessagesAdapter:
                 )
 
             # Handle text content
+            refusal = getattr(choice.message, "refusal", None)
+            if refusal:
+                new_content.append(AnthropicResponseContentBlockText(type="text", text=refusal).model_dump())
             if choice.message.content is not None:
                 new_content.append(
                     AnthropicResponseContentBlockText(
@@ -1285,6 +1317,9 @@ class LiteLLMAnthropicMessagesAdapter:
     def _translate_openai_finish_reason_to_anthropic(
         self, openai_finish_reason: str
     ) -> AnthropicFinishReason:
+        """Preserve refusal in both final JSON and streaming message_delta bridges."""
+        if openai_finish_reason in ("content_filter", "refusal"):
+            return "refusal"
         if openai_finish_reason == "stop":
             return "end_turn"
         elif openai_finish_reason == "length":
@@ -1314,31 +1349,21 @@ class LiteLLMAnthropicMessagesAdapter:
         )
         ## extract finish reason
         anthropic_finish_reason = self._translate_openai_finish_reason_to_anthropic(
-            openai_finish_reason=response.choices[0].finish_reason  # type: ignore
+            openai_finish_reason=("content_filter" if getattr(response.choices[0].message, "refusal", None) else response.choices[0].finish_reason)  # type: ignore
         )
         # extract usage
         usage: Usage = getattr(response, "usage")
-        uncached_input_tokens = usage.prompt_tokens or 0
-        cached_tokens = 0
-        if hasattr(usage, "prompt_tokens_details") and usage.prompt_tokens_details:
-            cached_tokens = (
-                getattr(usage.prompt_tokens_details, "cached_tokens", 0) or 0
-            )
-            uncached_input_tokens -= cached_tokens
+        cache_creation, cache_read = extract_cache_tokens(usage)
+        uncached_input_tokens = (usage.prompt_tokens or 0) - cache_read
 
         anthropic_usage = AnthropicUsage(
             input_tokens=uncached_input_tokens,
             output_tokens=usage.completion_tokens or 0,
         )
-        if (
-            hasattr(usage, "_cache_creation_input_tokens")
-            and usage._cache_creation_input_tokens > 0
-        ):
-            anthropic_usage[
-                "cache_creation_input_tokens"
-            ] = usage._cache_creation_input_tokens
-        if cached_tokens > 0:
-            anthropic_usage["cache_read_input_tokens"] = cached_tokens
+        if cache_creation > 0:
+            anthropic_usage["cache_creation_input_tokens"] = cache_creation
+        if cache_read > 0:
+            anthropic_usage["cache_read_input_tokens"] = cache_read
 
         translated_obj = AnthropicMessagesResponse(
             id=response.id,
@@ -1411,11 +1436,13 @@ class LiteLLMAnthropicMessagesAdapter:
             ContentThinkingSignatureBlockDelta,
         ],
     ]:
+        # OpenAI may carry refusal text in delta.refusal instead of content.
         text: str = ""
         reasoning_content: str = ""
         reasoning_signature: str = ""
         partial_json: Optional[str] = None
         for choice in choices:
+            text += getattr(choice.delta, "refusal", None) or ""
             if choice.delta.content is not None and len(choice.delta.content) > 0:
                 text += choice.delta.content
             if choice.delta.tool_calls is not None:
@@ -1489,35 +1516,17 @@ class LiteLLMAnthropicMessagesAdapter:
             else:
                 litellm_usage_chunk = None
             if litellm_usage_chunk is not None:
-                uncached_input_tokens = litellm_usage_chunk.prompt_tokens or 0
-                cached_tokens = 0
-                if (
-                    hasattr(litellm_usage_chunk, "prompt_tokens_details")
-                    and litellm_usage_chunk.prompt_tokens_details
-                ):
-                    cached_tokens = (
-                        getattr(
-                            litellm_usage_chunk.prompt_tokens_details,
-                            "cached_tokens",
-                            0,
-                        )
-                        or 0
-                    )
-                    uncached_input_tokens -= cached_tokens
+                cache_creation, cache_read = extract_cache_tokens(litellm_usage_chunk)
+                uncached_input_tokens = (litellm_usage_chunk.prompt_tokens or 0) - cache_read
 
                 usage_delta = UsageDelta(
                     input_tokens=uncached_input_tokens,
                     output_tokens=litellm_usage_chunk.completion_tokens or 0,
                 )
-                if (
-                    hasattr(litellm_usage_chunk, "_cache_creation_input_tokens")
-                    and litellm_usage_chunk._cache_creation_input_tokens > 0
-                ):
-                    usage_delta[
-                        "cache_creation_input_tokens"
-                    ] = litellm_usage_chunk._cache_creation_input_tokens
-                if cached_tokens > 0:
-                    usage_delta["cache_read_input_tokens"] = cached_tokens
+                if cache_creation > 0:
+                    usage_delta["cache_creation_input_tokens"] = cache_creation
+                if cache_read > 0:
+                    usage_delta["cache_read_input_tokens"] = cache_read
             else:
                 usage_delta = UsageDelta(input_tokens=0, output_tokens=0)
             return MessageBlockDelta(

@@ -1,3 +1,9 @@
+"""Router fallback attempts and success/failure event reporting.
+
+Uncertain paid media submissions stop the chain immediately; callback handling
+must not turn a reserved Wokey job into another provider's new generation.
+"""
+
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
@@ -152,6 +158,9 @@ async def run_async_fallback(
             )
             return response
         except Exception as e:
+            # Preserve uncertainty from a paid POST rather than trying another candidate.
+            if getattr(e, "media_no_resubmit", False):
+                raise
             error_from_fallbacks = e
             await log_failure_fallback_event(
                 original_model_group=original_model_group,

@@ -2656,6 +2656,7 @@ interface UiSpendLogsParams {
   request_id?: string;
   user_id?: string;
   end_user?: string;
+  request_tag?: string;
   status_filter?: string;
   /** Filter by model name (e.g. "gpt-4") */
   model?: string;

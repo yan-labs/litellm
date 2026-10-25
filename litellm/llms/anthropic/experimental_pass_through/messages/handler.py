@@ -17,6 +17,7 @@ from litellm.llms.base_llm.anthropic_messages.transformation import (
 )
 from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from litellm.llms.custom_httpx.llm_http_handler import BaseLLMHTTPHandler
+from litellm.proxy.kollab_latency_debug import latency_now, log_latency_stage
 from litellm.types.llms.anthropic_messages.anthropic_request import AnthropicMetadata
 from litellm.types.llms.anthropic_messages.anthropic_response import (
     AnthropicMessagesResponse,
@@ -33,12 +34,22 @@ from .utils import AnthropicMessagesRequestUtils, mock_response
 _RESPONSES_API_PROVIDERS = frozenset({"openai"})
 
 
-def _should_route_to_responses_api(custom_llm_provider: Optional[str]) -> bool:
+def _should_route_to_responses_api(
+    custom_llm_provider: Optional[str], model: Optional[str] = None
+) -> bool:
     """Return True when the provider should use the Responses API path.
 
     Set ``litellm.use_chat_completions_url_for_anthropic_messages = True`` to
-    opt out and route OpenAI/Azure requests through chat/completions instead.
+    opt out of the default OpenAI Responses path. Explicit ``responses/``
+    routes still use Responses.
     """
+    # An explicit Responses route takes precedence over the default-path opt-out.
+    if (
+        custom_llm_provider in _RESPONSES_API_PROVIDERS
+        and model is not None
+        and model.startswith("responses/")
+    ):
+        return True
     if litellm.use_chat_completions_url_for_anthropic_messages:
         return False
     return custom_llm_provider in _RESPONSES_API_PROVIDERS
@@ -187,6 +198,26 @@ async def anthropic_messages(
     """
     Async: Make llm api request in Anthropic /messages API spec
     """
+    wrapper_started_at = latency_now()
+    request_shape_data = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "system": system,
+        "stream": stream,
+        "max_tokens": max_tokens,
+        "metadata": metadata,
+        "thinking": thinking,
+    }
+    log_latency_stage(
+        "anthropic_wrapper_start",
+        started_at=wrapper_started_at,
+        data=request_shape_data,
+        logging_obj=kwargs.get("litellm_logging_obj"),
+        route_type="anthropic_messages",
+        model=model,
+        provider=custom_llm_provider,
+    )
     # Save original stream flag before pre-request hooks can convert it.
     # The websearch interception hook converts stream=True → stream=False
     # for the agentic loop, but the short-circuit path needs to know
@@ -194,6 +225,7 @@ async def anthropic_messages(
     original_stream = stream
 
     # Execute pre-request hooks to allow CustomLoggers to modify request
+    pre_hooks_started_at = latency_now()
     request_kwargs = await _execute_pre_request_hooks(
         model=model,
         messages=messages,
@@ -201,6 +233,16 @@ async def anthropic_messages(
         stream=stream,
         custom_llm_provider=custom_llm_provider,
         **kwargs,
+    )
+    log_latency_stage(
+        "anthropic_pre_hooks_complete",
+        started_at=pre_hooks_started_at,
+        data=request_shape_data,
+        logging_obj=kwargs.get("litellm_logging_obj"),
+        route_type="anthropic_messages",
+        model=model,
+        provider=custom_llm_provider,
+        details={"callback_count": len(litellm.callbacks or [])},
     )
 
     # Extract modified parameters
@@ -236,6 +278,16 @@ async def anthropic_messages(
         stream=original_stream,
     )
     if short_circuit_response is not None:
+        log_latency_stage(
+            "anthropic_websearch_short_circuit",
+            started_at=wrapper_started_at,
+            data=request_shape_data,
+            logging_obj=kwargs.get("litellm_logging_obj"),
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={"response_type": type(short_circuit_response).__name__},
+        )
         return short_circuit_response
 
     loop = asyncio.get_event_loop()
@@ -264,12 +316,44 @@ async def anthropic_messages(
     )
     ctx = contextvars.copy_context()
     func_with_context = partial(ctx.run, func)
+    executor_started_at = latency_now()
     init_response = await loop.run_in_executor(None, func_with_context)
+    log_latency_stage(
+        "anthropic_executor_init_complete",
+        started_at=executor_started_at,
+        data=request_shape_data,
+        logging_obj=kwargs.get("litellm_logging_obj"),
+        route_type="anthropic_messages",
+        model=model,
+        provider=custom_llm_provider,
+        details={"init_response_type": type(init_response).__name__},
+    )
 
     if asyncio.iscoroutine(init_response):
+        coroutine_started_at = latency_now()
         response = await init_response
+        log_latency_stage(
+            "anthropic_coroutine_complete",
+            started_at=coroutine_started_at,
+            data=request_shape_data,
+            logging_obj=kwargs.get("litellm_logging_obj"),
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={"response_type": type(response).__name__},
+        )
     else:
         response = init_response
+    log_latency_stage(
+        "anthropic_wrapper_complete",
+        started_at=wrapper_started_at,
+        data=request_shape_data,
+        logging_obj=kwargs.get("litellm_logging_obj"),
+        route_type="anthropic_messages",
+        model=model,
+        provider=custom_llm_provider,
+        details={"response_type": type(response).__name__},
+    )
     return response
 
 
@@ -316,6 +400,7 @@ def anthropic_messages_handler(
     Args:
         container: Container config with skills for code execution
     """
+    handler_started_at = latency_now()
     from litellm.types.utils import LlmProviders
 
     metadata = validate_anthropic_api_metadata(metadata)
@@ -324,6 +409,25 @@ def anthropic_messages_handler(
     is_async = kwargs.pop("is_async", False)
     # Use provided client or create a new one
     litellm_logging_obj: LiteLLMLoggingObj = kwargs.get("litellm_logging_obj")  # type: ignore
+    request_shape_data = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "system": system,
+        "stream": stream,
+        "max_tokens": max_tokens,
+        "metadata": metadata,
+        "thinking": thinking,
+    }
+    log_latency_stage(
+        "anthropic_handler_start",
+        started_at=handler_started_at,
+        data=request_shape_data,
+        logging_obj=litellm_logging_obj,
+        route_type="anthropic_messages",
+        model=model,
+        provider=custom_llm_provider,
+    )
 
     # Store original model name before get_llm_provider strips the provider prefix
     # This is needed by agentic hooks (e.g., websearch_interception) to make follow-up requests
@@ -345,6 +449,19 @@ def anthropic_messages_handler(
         custom_llm_provider=custom_llm_provider,
         api_base=litellm_params.api_base,
         api_key=litellm_params.api_key,
+    )
+    log_latency_stage(
+        "anthropic_provider_resolved",
+        started_at=handler_started_at,
+        data={**request_shape_data, "model": model},
+        logging_obj=litellm_logging_obj,
+        route_type="anthropic_messages",
+        model=model,
+        provider=custom_llm_provider,
+        details={
+            "has_dynamic_api_key": bool(dynamic_api_key),
+            "has_dynamic_api_base": bool(dynamic_api_base),
+        },
     )
 
     # Store agentic loop params in logging object for agentic hooks
@@ -382,6 +499,18 @@ def anthropic_messages_handler(
             )
         )
     if anthropic_messages_provider_config is None:
+        log_latency_stage(
+            "anthropic_adapter_route_selected",
+            started_at=handler_started_at,
+            data={**request_shape_data, "model": model},
+            logging_obj=litellm_logging_obj,
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={
+                "responses_api": _should_route_to_responses_api(custom_llm_provider, model)
+            },
+        )
         # Route to Responses API for OpenAI / Azure, chat/completions for everything else.
         _shared_kwargs = dict(
             max_tokens=max_tokens,
@@ -404,7 +533,7 @@ def anthropic_messages_handler(
             custom_llm_provider=custom_llm_provider,
             **kwargs,
         )
-        if _should_route_to_responses_api(custom_llm_provider):
+        if _should_route_to_responses_api(custom_llm_provider, model):
             return LiteLLMMessagesToResponsesAPIHandler.anthropic_messages_handler(
                 **_shared_kwargs
             )
@@ -424,6 +553,19 @@ def anthropic_messages_handler(
         AnthropicMessagesRequestUtils.get_requested_anthropic_messages_optional_param(
             params=local_vars
         )
+    )
+    log_latency_stage(
+        "anthropic_provider_config_ready",
+        started_at=handler_started_at,
+        data={**request_shape_data, "model": model},
+        logging_obj=litellm_logging_obj,
+        route_type="anthropic_messages",
+        model=model,
+        provider=custom_llm_provider,
+        details={
+            "provider_config": anthropic_messages_provider_config.__class__.__name__,
+            "optional_param_count": len(anthropic_messages_optional_request_params),
+        },
     )
     return base_llm_http_handler.anthropic_messages_handler(
         model=model,

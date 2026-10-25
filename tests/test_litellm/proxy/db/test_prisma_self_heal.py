@@ -11,6 +11,7 @@ sys.path.insert(
     0, os.path.abspath("../../../..")
 )  # Adds the parent directory to the system path
 
+from litellm.proxy.db.prisma_client import PrismaWrapper
 from litellm.proxy.utils import PrismaClient, ProxyLogging
 
 
@@ -206,6 +207,60 @@ async def test_run_reconnect_cycle_timeout_should_use_single_overall_budget(
 
     with pytest.raises(asyncio.TimeoutError):
         await client._run_reconnect_cycle(timeout_seconds=0.1)
+
+
+@pytest.mark.asyncio
+async def test_recreate_prisma_client_should_replace_client_when_disconnect_times_out():
+    old_prisma = MagicMock()
+
+    async def _never_disconnect():
+        await asyncio.Event().wait()
+
+    old_prisma.disconnect = AsyncMock(side_effect=_never_disconnect)
+    wrapper = PrismaWrapper(original_prisma=old_prisma, iam_token_db_auth=False)
+
+    replacement_prisma = MagicMock()
+    replacement_prisma.connect = AsyncMock(return_value=None)
+    mock_prisma_module = MagicMock()
+    mock_prisma_module.Prisma.return_value = replacement_prisma
+
+    with (
+        patch.dict(sys.modules, {"prisma": mock_prisma_module}),
+        patch.object(wrapper, "_get_engine_pid", return_value=2770),
+        patch.object(
+            wrapper,
+            "_kill_engine_process",
+            new_callable=AsyncMock,
+        ) as mock_kill_engine,
+    ):
+        await wrapper.recreate_prisma_client(
+            "postgresql://example.invalid/litellm",
+            disconnect_timeout_seconds=0.01,
+        )
+
+    old_prisma.disconnect.assert_awaited_once()
+    mock_kill_engine.assert_awaited_once_with(2770)
+    assert wrapper._original_prisma is replacement_prisma
+    replacement_prisma.connect.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_heavy_reconnect_should_bound_dead_client_disconnect(
+    mock_proxy_logging,
+):
+    client = PrismaClient(database_url="mock://test", proxy_logging_obj=mock_proxy_logging)
+    client._engine_confirmed_dead = True
+    client.db.recreate_prisma_client = AsyncMock(return_value=None)
+    client._start_engine_watcher = AsyncMock(return_value=None)
+
+    with patch.dict(os.environ, {"DATABASE_URL": "mock://test"}):
+        await client._run_reconnect_cycle(timeout_seconds=2.0)
+
+    client.db.recreate_prisma_client.assert_awaited_once_with(
+        "mock://test",
+        disconnect_timeout_seconds=1.0,
+    )
+    client._start_engine_watcher.assert_awaited_once()
 
 
 @pytest.mark.asyncio

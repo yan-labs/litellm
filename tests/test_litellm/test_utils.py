@@ -768,6 +768,7 @@ def test_aaamodel_prices_and_context_window_json_is_valid():
                 "supports_minimal_reasoning_effort": {"type": "boolean"},
                 "supports_none_reasoning_effort": {"type": "boolean"},
                 "supports_xhigh_reasoning_effort": {"type": "boolean"},
+                "supports_max_reasoning_effort": {"type": "boolean"},
                 "supports_service_tier": {"type": "boolean"},
                 "supports_preset": {"type": "boolean"},
                 "tool_use_system_prompt_tokens": {"type": "number"},
@@ -2847,6 +2848,33 @@ def test_model_info_for_fireworks_short_form_models():
     assert info["max_input_tokens"] == 262144
 
 
+def test_model_info_for_minimax_m2_7():
+    """
+    Test that minimax/MiniMax-M2.7 is configured for cost attribution.
+    """
+    import json
+    from pathlib import Path
+
+    json_path = Path(__file__).parents[2] / "model_prices_and_context_window.json"
+    with open(json_path) as f:
+        model_cost = json.load(f)
+
+    info = model_cost.get("minimax/MiniMax-M2.7")
+    assert info is not None, "minimax/MiniMax-M2.7 not found in model_prices_and_context_window.json"
+    assert info["litellm_provider"] == "minimax"
+    assert info["mode"] == "chat"
+    assert info["input_cost_per_token"] == 3e-07
+    assert info["output_cost_per_token"] == 1.2e-06
+    assert info["cache_read_input_token_cost"] == 6e-08
+    assert info["cache_creation_input_token_cost"] == 3.75e-07
+    assert info["max_input_tokens"] == 204800
+    assert info["max_output_tokens"] == 8192
+    assert info["supports_reasoning"] is True
+    assert info["supports_prompt_caching"] is True
+    assert info["supports_function_calling"] is True
+    assert info["supports_tool_choice"] is True
+
+
 class TestGetValidModelsWithCLI:
     """Test get_valid_models function as used in CLI token usage"""
 
@@ -3557,6 +3585,21 @@ class TestDropParamsWithPromptCacheKey:
         # prompt_cache_key should be dropped for Bedrock
         assert "prompt_cache_key" not in result
         # temperature should remain (it's supported by Bedrock)
+        assert result.get("temperature") == 0.7
+
+    def test_empty_vector_store_ids_is_dropped_for_bedrock(self):
+        """Empty vector_store_ids is a no-op and should not reach Bedrock."""
+        from litellm.utils import get_optional_params
+
+        result = get_optional_params(
+            model="global.anthropic.claude-sonnet-4-6",
+            custom_llm_provider="bedrock",
+            vector_store_ids=[],
+            temperature=0.7,
+            drop_params=True,
+        )
+
+        assert "vector_store_ids" not in result
         assert result.get("temperature") == 0.7
 
 

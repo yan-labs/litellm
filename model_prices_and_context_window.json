@@ -997,7 +997,9 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
-        "tool_use_system_prompt_tokens": 346
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true,
+        "supports_max_reasoning_effort": true
     },
     "global.anthropic.claude-opus-4-6-v1": {
         "cache_creation_input_token_cost": 6.25e-06,
@@ -1027,7 +1029,9 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
-        "tool_use_system_prompt_tokens": 346
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true,
+        "supports_max_reasoning_effort": true
     },
     "us.anthropic.claude-opus-4-6-v1": {
         "cache_creation_input_token_cost": 6.875e-06,
@@ -1057,7 +1061,9 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
-        "tool_use_system_prompt_tokens": 346
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true,
+        "supports_max_reasoning_effort": true
     },
     "eu.anthropic.claude-opus-4-6-v1": {
         "cache_creation_input_token_cost": 6.875e-06,
@@ -1087,7 +1093,9 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
-        "tool_use_system_prompt_tokens": 346
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true,
+        "supports_max_reasoning_effort": true
     },
     "au.anthropic.claude-opus-4-6-v1": {
         "cache_creation_input_token_cost": 6.875e-06,
@@ -1117,7 +1125,149 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
-        "tool_use_system_prompt_tokens": 346
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true,
+        "supports_max_reasoning_effort": true
+    },
+    "anthropic.claude-opus-4-7-v1": {
+        "cache_creation_input_token_cost": 6.25e-06,
+        "cache_read_input_token_cost": 5e-07,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "bedrock_converse",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.5e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true
+    },
+    "global.anthropic.claude-opus-4-7-v1": {
+        "cache_creation_input_token_cost": 6.25e-06,
+        "cache_read_input_token_cost": 5e-07,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "bedrock_converse",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.5e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true
+    },
+    "us.anthropic.claude-opus-4-7-v1": {
+        "cache_creation_input_token_cost": 6.875e-06,
+        "cache_read_input_token_cost": 5.5e-07,
+        "input_cost_per_token": 5.5e-06,
+        "litellm_provider": "bedrock_converse",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.75e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true
+    },
+    "eu.anthropic.claude-opus-4-7-v1": {
+        "cache_creation_input_token_cost": 6.875e-06,
+        "cache_read_input_token_cost": 5.5e-07,
+        "input_cost_per_token": 5.5e-06,
+        "litellm_provider": "bedrock_converse",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.75e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true
+    },
+    "au.anthropic.claude-opus-4-7-v1": {
+        "cache_creation_input_token_cost": 6.875e-06,
+        "cache_read_input_token_cost": 5.5e-07,
+        "input_cost_per_token": 5.5e-06,
+        "litellm_provider": "bedrock_converse",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.75e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
+        "tool_use_system_prompt_tokens": 346,
+        "supports_native_structured_output": true
     },
     "anthropic.claude-sonnet-4-6": {
         "cache_creation_input_token_cost": 3.75e-06,
@@ -1781,6 +1931,35 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
+        "tool_use_system_prompt_tokens": 159,
+        "supports_max_reasoning_effort": true
+    },
+    "azure_ai/claude-opus-4-7": {
+        "input_cost_per_token": 5e-06,
+        "output_cost_per_token": 2.5e-05,
+        "litellm_provider": "azure_ai",
+        "max_input_tokens": 200000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "cache_creation_input_token_cost": 6.25e-06,
+        "cache_creation_input_token_cost_above_1hr": 1e-05,
+        "cache_read_input_token_cost": 5e-07,
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
         "tool_use_system_prompt_tokens": 159
     },
     "azure_ai/claude-opus-4-1": {
@@ -8726,7 +8905,8 @@
         "provider_specific_entry": {
             "us": 1.1,
             "fast": 6.0
-        }
+        },
+        "supports_max_reasoning_effort": true
     },
     "claude-opus-4-6-20260205": {
         "cache_creation_input_token_cost": 6.25e-06,
@@ -8757,6 +8937,71 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
+        "tool_use_system_prompt_tokens": 346,
+        "provider_specific_entry": {
+            "us": 1.1,
+            "fast": 6.0
+        },
+        "supports_max_reasoning_effort": true
+    },
+    "claude-opus-4-7": {
+        "cache_creation_input_token_cost": 6.25e-06,
+        "cache_creation_input_token_cost_above_1hr": 1e-05,
+        "cache_read_input_token_cost": 5e-07,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "anthropic",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.5e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
+        "tool_use_system_prompt_tokens": 346,
+        "provider_specific_entry": {
+            "us": 1.1,
+            "fast": 6.0
+        }
+    },
+    "claude-opus-4-7-20260416": {
+        "cache_creation_input_token_cost": 6.25e-06,
+        "cache_creation_input_token_cost_above_1hr": 1e-05,
+        "cache_read_input_token_cost": 5e-07,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "anthropic",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.5e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
         "tool_use_system_prompt_tokens": 346,
         "provider_specific_entry": {
             "us": 1.1,
@@ -21375,6 +21620,21 @@
         "max_input_tokens": 1000000,
         "max_output_tokens": 8192
     },
+    "minimax/MiniMax-M2.7": {
+        "input_cost_per_token": 3e-07,
+        "output_cost_per_token": 1.2e-06,
+        "cache_read_input_token_cost": 6e-08,
+        "cache_creation_input_token_cost": 3.75e-07,
+        "litellm_provider": "minimax",
+        "mode": "chat",
+        "supports_function_calling": true,
+        "supports_tool_choice": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_system_messages": true,
+        "max_input_tokens": 204800,
+        "max_output_tokens": 8192
+    },
     "minimax/MiniMax-M2": {
         "input_cost_per_token": 3e-07,
         "output_cost_per_token": 1.2e-06,
@@ -24526,6 +24786,58 @@
         "supports_web_search": true,
         "tpm": 800000
     },
+    "openrouter/google/gemini-3.1-flash-lite-preview": {
+        "cache_read_input_token_cost": 2.5e-08,
+        "cache_read_input_token_cost_per_audio_token": 5e-08,
+        "input_cost_per_audio_token": 5e-07,
+        "input_cost_per_token": 2.5e-07,
+        "litellm_provider": "openrouter",
+        "max_audio_length_hours": 8.4,
+        "max_audio_per_prompt": 1,
+        "max_images_per_prompt": 3000,
+        "max_input_tokens": 1048576,
+        "max_output_tokens": 65536,
+        "max_pdf_size_mb": 30,
+        "max_tokens": 65536,
+        "max_video_length": 1,
+        "max_videos_per_prompt": 10,
+        "mode": "chat",
+        "output_cost_per_reasoning_token": 1.5e-06,
+        "output_cost_per_token": 1.5e-06,
+        "rpm": 2000,
+        "source": "https://ai.google.dev/pricing/gemini-3",
+        "supported_endpoints": [
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/batch"
+        ],
+        "supported_modalities": [
+            "text",
+            "image",
+            "audio",
+            "video"
+        ],
+        "supported_output_modalities": [
+            "text"
+        ],
+        "supports_audio_input": true,
+        "supports_audio_output": false,
+        "supports_code_execution": true,
+        "supports_file_search": true,
+        "supports_function_calling": true,
+        "supports_parallel_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_system_messages": true,
+        "supports_tool_choice": true,
+        "supports_url_context": true,
+        "supports_video_input": true,
+        "supports_vision": true,
+        "supports_web_search": true,
+        "tpm": 800000
+    },
     "openrouter/google/gemini-3.1-pro-preview": {
         "cache_read_input_token_cost": 2e-07,
         "cache_read_input_token_cost_above_200k_tokens": 4e-07,
@@ -26039,6 +26351,13 @@
         "supports_function_calling": true
     },
     "perplexity/anthropic/claude-opus-4-6": {
+        "litellm_provider": "perplexity",
+        "mode": "responses",
+        "supports_web_search": true,
+        "supports_reasoning": false,
+        "supports_function_calling": true
+    },
+    "perplexity/anthropic/claude-opus-4-7": {
         "litellm_provider": "perplexity",
         "mode": "responses",
         "supports_web_search": true,
@@ -27988,12 +28307,15 @@
     "together_ai/openai/gpt-oss-120b": {
         "input_cost_per_token": 1.5e-07,
         "litellm_provider": "together_ai",
-        "max_input_tokens": 128000,
+        "max_input_tokens": 131072,
+        "max_output_tokens": 131072,
+        "max_tokens": 131072,
         "mode": "chat",
         "output_cost_per_token": 6e-07,
         "source": "https://www.together.ai/models/gpt-oss-120b",
         "supports_function_calling": true,
         "supports_parallel_function_calling": true,
+        "supports_reasoning": true,
         "supports_response_schema": true,
         "supports_tool_choice": true
     },
@@ -30349,7 +30671,8 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
-        "tool_use_system_prompt_tokens": 346
+        "tool_use_system_prompt_tokens": 346,
+        "supports_max_reasoning_effort": true
     },
     "vertex_ai/claude-opus-4-6@default": {
         "cache_creation_input_token_cost": 6.25e-06,
@@ -30379,6 +30702,61 @@
         "supports_response_schema": true,
         "supports_tool_choice": true,
         "supports_vision": true,
+        "tool_use_system_prompt_tokens": 346,
+        "supports_max_reasoning_effort": true
+    },
+    "vertex_ai/claude-opus-4-7": {
+        "cache_creation_input_token_cost": 6.25e-06,
+        "cache_read_input_token_cost": 5e-07,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "vertex_ai-anthropic_models",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.5e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
+        "tool_use_system_prompt_tokens": 346
+    },
+    "vertex_ai/claude-opus-4-7@default": {
+        "cache_creation_input_token_cost": 6.25e-06,
+        "cache_read_input_token_cost": 5e-07,
+        "input_cost_per_token": 5e-06,
+        "litellm_provider": "vertex_ai-anthropic_models",
+        "max_input_tokens": 1000000,
+        "max_output_tokens": 128000,
+        "max_tokens": 128000,
+        "mode": "chat",
+        "output_cost_per_token": 2.5e-05,
+        "search_context_cost_per_query": {
+            "search_context_size_high": 0.01,
+            "search_context_size_low": 0.01,
+            "search_context_size_medium": 0.01
+        },
+        "supports_assistant_prefill": false,
+        "supports_computer_use": true,
+        "supports_function_calling": true,
+        "supports_pdf_input": true,
+        "supports_prompt_caching": true,
+        "supports_reasoning": true,
+        "supports_response_schema": true,
+        "supports_tool_choice": true,
+        "supports_vision": true,
+        "supports_xhigh_reasoning_effort": true,
         "tool_use_system_prompt_tokens": 346
     },
     "vertex_ai/claude-sonnet-4-5": {
@@ -37394,5 +37772,493 @@
                 ]
             }
         ]
+    },
+    "kie/bytedance/seedance-2-5": {
+        "litellm_provider": "kie",
+        "mode": "video_generation",
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "kie_config": {
+            "create_model": "bytedance/seedance-2-5",
+            "defaults": {
+                "duration": 5,
+                "resolution": "720p",
+                "aspect_ratio": "adaptive",
+                "generate_audio": true
+            },
+            "allowed": [
+                "duration",
+                "resolution",
+                "aspect_ratio",
+                "generate_audio",
+                "first_frame_url",
+                "last_frame_url",
+                "reference_image_urls",
+                "reference_video_urls",
+                "reference_audio_urls"
+            ],
+            "duration_range": [
+                4,
+                30
+            ],
+            "auto_duration": true,
+            "enums": {
+                "resolution": [
+                    "480p",
+                    "720p",
+                    "1080p"
+                ],
+                "aspect_ratio": [
+                    "1:1",
+                    "4:3",
+                    "3:4",
+                    "16:9",
+                    "9:16",
+                    "21:9",
+                    "adaptive"
+                ]
+            },
+            "frames": {
+                "first_frame": "first_frame_url",
+                "last_frame": "last_frame_url"
+            },
+            "references": {
+                "image": "reference_image_urls",
+                "video": "reference_video_urls",
+                "audio": "reference_audio_urls"
+            },
+            "limits": {
+                "reference_image_urls": 30,
+                "reference_video_urls": 10,
+                "reference_audio_urls": 10
+            },
+            "exclusive_frames": true,
+            "size_resolution": {
+                "480": "480p",
+                "720": "720p",
+                "1080": "1080p"
+            },
+            "credits_per_second": {
+                "480p": [
+                    28,
+                    17
+                ],
+                "720p": [
+                    63,
+                    38
+                ],
+                "1080p": [
+                    158,
+                    95
+                ]
+            }
+        },
+        "kie_credit_usd": 0.005
+    },
+    "kie/bytedance/seedance-2-fast": {
+        "litellm_provider": "kie",
+        "mode": "video_generation",
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "kie_config": {
+            "create_model": "bytedance/seedance-2-fast",
+            "defaults": {
+                "duration": 5,
+                "resolution": "720p",
+                "aspect_ratio": "16:9",
+                "generate_audio": true
+            },
+            "allowed": [
+                "duration",
+                "resolution",
+                "aspect_ratio",
+                "generate_audio",
+                "first_frame_url",
+                "last_frame_url",
+                "reference_image_urls",
+                "reference_video_urls",
+                "reference_audio_urls"
+            ],
+            "duration_range": [
+                4,
+                15
+            ],
+            "auto_duration": true,
+            "enums": {
+                "resolution": [
+                    "480p",
+                    "720p"
+                ],
+                "aspect_ratio": [
+                    "1:1",
+                    "4:3",
+                    "3:4",
+                    "16:9",
+                    "9:16",
+                    "21:9",
+                    "adaptive"
+                ]
+            },
+            "frames": {
+                "first_frame": "first_frame_url",
+                "last_frame": "last_frame_url"
+            },
+            "references": {
+                "image": "reference_image_urls",
+                "video": "reference_video_urls",
+                "audio": "reference_audio_urls"
+            },
+            "limits": {
+                "reference_image_urls": 9,
+                "reference_video_urls": 3,
+                "reference_audio_urls": 3
+            },
+            "exclusive_frames": false,
+            "size_resolution": {
+                "480": "480p",
+                "720": "720p",
+                "1080": "1080p"
+            },
+            "credits_per_second": {
+                "480p": [
+                    11.7,
+                    6.8
+                ],
+                "720p": [
+                    24.8,
+                    15
+                ]
+            }
+        },
+        "kie_credit_usd": 0.005
+    },
+    "kie/bytedance/seedance-2-mini": {
+        "litellm_provider": "kie",
+        "mode": "video_generation",
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "kie_config": {
+            "create_model": "bytedance/seedance-2-mini",
+            "defaults": {
+                "duration": 5,
+                "resolution": "720p",
+                "aspect_ratio": "16:9",
+                "generate_audio": true
+            },
+            "allowed": [
+                "duration",
+                "resolution",
+                "aspect_ratio",
+                "generate_audio",
+                "first_frame_url",
+                "last_frame_url",
+                "reference_image_urls",
+                "reference_video_urls",
+                "reference_audio_urls"
+            ],
+            "duration_range": [
+                4,
+                15
+            ],
+            "auto_duration": true,
+            "enums": {
+                "resolution": [
+                    "480p",
+                    "720p"
+                ],
+                "aspect_ratio": [
+                    "1:1",
+                    "4:3",
+                    "3:4",
+                    "16:9",
+                    "9:16",
+                    "21:9",
+                    "adaptive"
+                ]
+            },
+            "frames": {
+                "first_frame": "first_frame_url",
+                "last_frame": "last_frame_url"
+            },
+            "references": {
+                "image": "reference_image_urls",
+                "video": "reference_video_urls",
+                "audio": "reference_audio_urls"
+            },
+            "limits": {
+                "reference_image_urls": 9,
+                "reference_video_urls": 3,
+                "reference_audio_urls": 3
+            },
+            "exclusive_frames": false,
+            "size_resolution": {
+                "480": "480p",
+                "720": "720p",
+                "1080": "1080p"
+            },
+            "credits_per_second": {
+                "480p": [
+                    3.8,
+                    2.4
+                ],
+                "720p": [
+                    8.2,
+                    5
+                ]
+            }
+        },
+        "kie_credit_usd": 0.005
+    },
+    "kie/kling-3.0/video": {
+        "litellm_provider": "kie",
+        "mode": "video_generation",
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "kie_config": {
+            "create_model": "kling-3.0/video",
+            "defaults": {
+                "duration": "5",
+                "mode": "pro",
+                "aspect_ratio": "16:9",
+                "sound": false,
+                "multi_shots": false,
+                "multi_prompt": []
+            },
+            "allowed": [
+                "duration",
+                "mode",
+                "aspect_ratio",
+                "sound",
+                "multi_shots",
+                "multi_prompt",
+                "image_urls",
+                "kling_elements"
+            ],
+            "duration_range": [
+                3,
+                15
+            ],
+            "string_duration": true,
+            "mapping": {
+                "resolution": "mode",
+                "generate_audio": "sound"
+            },
+            "resolution_modes": {
+                "720p": "std",
+                "1080p": "pro",
+                "4k": "4K",
+                "4K": "4K"
+            },
+            "enums": {
+                "mode": [
+                    "std",
+                    "pro",
+                    "4K"
+                ],
+                "aspect_ratio": [
+                    "16:9",
+                    "9:16",
+                    "1:1"
+                ]
+            },
+            "frames": {
+                "first_frame": "image_urls",
+                "last_frame": "image_urls"
+            },
+            "limits": {
+                "image_urls": 2,
+                "kling_elements": 3
+            },
+            "size_resolution": {
+                "720": "720p",
+                "1080": "1080p",
+                "2160": "4K"
+            },
+            "credits_per_second": {
+                "std": [
+                    14,
+                    20
+                ],
+                "pro": [
+                    18,
+                    27
+                ],
+                "4K": [
+                    67,
+                    67
+                ]
+            }
+        },
+        "kie_credit_usd": 0.005
+    },
+    "kie/grok-imagine-video-1-5-preview": {
+        "litellm_provider": "kie",
+        "mode": "video_generation",
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "kie_config": {
+            "create_model": "grok-imagine-video-1-5-preview",
+            "defaults": {
+                "duration": 8,
+                "resolution": "480p",
+                "aspect_ratio": "auto"
+            },
+            "allowed": [
+                "duration",
+                "resolution",
+                "aspect_ratio",
+                "image_urls"
+            ],
+            "duration_range": [
+                1,
+                15
+            ],
+            "enums": {
+                "resolution": [
+                    "480p",
+                    "720p",
+                    "1080p"
+                ],
+                "aspect_ratio": [
+                    "1:1",
+                    "16:9",
+                    "9:16",
+                    "3:2",
+                    "2:3",
+                    "auto"
+                ]
+            },
+            "frames": {
+                "first_frame": "image_urls"
+            },
+            "references": {
+                "image": "image_urls"
+            },
+            "limits": {
+                "image_urls": 7
+            },
+            "one_image_1080p": true,
+            "size_resolution": {
+                "480": "480p",
+                "720": "720p",
+                "1080": "1080p"
+            },
+            "credits_per_second_image_to_video": {
+                "480p": 2.4,
+                "720p": 4.5
+            }
+        },
+        "kie_credit_usd": 0.005
+    },
+    "kie/gpt-image-2-5-flare": {
+        "litellm_provider": "kie",
+        "mode": "image_generation",
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "kie_config": {
+            "create_model": "gpt-image-2-5-flare-text-to-image",
+            "edit_model": "gpt-image-2-5-flare-image-to-image",
+            "edit_field": "input_urls",
+            "defaults": {
+                "resolution": "1K",
+                "aspect_ratio": "auto"
+            },
+            "allowed": [
+                "resolution",
+                "aspect_ratio",
+                "background",
+                "input_urls"
+            ],
+            "quality": {
+                "low": "1K",
+                "medium": "2K",
+                "high": "4K"
+            },
+            "enums": {
+                "resolution": [
+                    "1K",
+                    "2K",
+                    "4K"
+                ],
+                "aspect_ratio": [
+                    "auto",
+                    "1:1",
+                    "3:2",
+                    "2:3",
+                    "4:3",
+                    "3:4",
+                    "16:9",
+                    "9:16",
+                    "21:9",
+                    "27:16",
+                    "16:27",
+                    "9:8",
+                    "8:9"
+                ],
+                "background": [
+                    "transparent",
+                    "opaque",
+                    "auto"
+                ]
+            },
+            "restricted_ratios": [
+                "27:16",
+                "16:27",
+                "9:8",
+                "8:9"
+            ],
+            "limits": {
+                "input_urls": 16
+            },
+            "credits_per_image": {
+                "1K": 6,
+                "2K": 10,
+                "4K": 16
+            }
+        },
+        "kie_credit_usd": 0.005
+    },
+    "kie/grok-imagine-image-2-0": {
+        "litellm_provider": "kie",
+        "mode": "image_generation",
+        "input_cost_per_token": 0.0,
+        "output_cost_per_token": 0.0,
+        "kie_config": {
+            "create_model": "grok-imagine-image-2-0/text-to-image",
+            "edit_model": "grok-imagine-image-2-0/image-edit",
+            "edit_field": "image_urls",
+            "defaults": {
+                "aspect_ratio": "1:1"
+            },
+            "allowed": [
+                "aspect_ratio",
+                "image_urls"
+            ],
+            "prompt_limit": 8000,
+            "enums": {
+                "aspect_ratio": [
+                    "1:1",
+                    "2:3",
+                    "3:2",
+                    "16:9",
+                    "9:16"
+                ]
+            },
+            "limits": {
+                "image_urls": 5
+            },
+            "credits_per_image": 4,
+            "edit_enums": {
+                "aspect_ratio": [
+                    "1:1",
+                    "2:3",
+                    "3:2",
+                    "16:9",
+                    "9:16",
+                    "auto"
+                ]
+            }
+        },
+        "kie_credit_usd": 0.005
     }
 }

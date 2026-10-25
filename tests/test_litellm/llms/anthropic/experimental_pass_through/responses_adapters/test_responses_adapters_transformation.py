@@ -582,14 +582,12 @@ class TestTranslateToolChoiceToResponsesAPI:
     """Anthropic tool_choice -> Responses API tool_choice."""
 
     def test_auto_maps_to_auto(self):
-        assert _ADAPTER.translate_tool_choice_to_responses_api({"type": "auto"}) == {
-            "type": "auto"
-        }
+        """Selection modes must use the Responses string representation."""
+        assert _ADAPTER.translate_tool_choice_to_responses_api({"type": "auto"}) == "auto"
 
     def test_any_maps_to_required(self):
-        assert _ADAPTER.translate_tool_choice_to_responses_api({"type": "any"}) == {
-            "type": "required"
-        }
+        """Anthropic any requires a tool through Responses required mode."""
+        assert _ADAPTER.translate_tool_choice_to_responses_api({"type": "any"}) == "required"
 
     def test_specific_tool_maps_to_function(self):
         result = _ADAPTER.translate_tool_choice_to_responses_api(
@@ -597,9 +595,10 @@ class TestTranslateToolChoiceToResponsesAPI:
         )
         assert result == {"type": "function", "name": "get_weather"}
 
-    def test_unknown_type_defaults_to_auto(self):
+    def test_none_disables_tools(self):
+        """Explicit none must prohibit tools rather than select automatically."""
         result = _ADAPTER.translate_tool_choice_to_responses_api({"type": "none"})
-        assert result == {"type": "auto"}
+        assert result == "none"
 
 
 # ---------------------------------------------------------------------------
@@ -835,6 +834,7 @@ def _make_mock_response(
     usage = MagicMock()
     usage.input_tokens = input_tokens
     usage.output_tokens = output_tokens
+    usage.input_tokens_details = None
 
     resp = MagicMock()
     resp.id = response_id

@@ -1,3 +1,8 @@
+"""Shared LiteLLM public response types and provider identifiers.
+
+Image usage includes provider-specific per-image USD for media settlement.
+"""
+
 import json
 import time
 from enum import Enum
@@ -162,6 +167,7 @@ class AgenticLoopParams(TypedDict, total=False):
 
 
 class ModelInfoBase(ProviderSpecificModelInfo, total=False):
+    kie_config: Optional[Dict[str, Any]]
     key: Required[str]  # the key in litellm.model_cost which is returned
 
     max_tokens: Required[Optional[int]]
@@ -2281,10 +2287,33 @@ class ImageUsage(BaseLiteLLMOpenAIResponseObject):
 from openai.types.images_response import ImagesResponse as OpenAIImageResponse
 
 
+class KieImageUsage(BaseLiteLLMOpenAIResponseObject):
+    """Kie bills task credits, not OpenAI image tokens."""
+
+    provider: Literal["kie"] = "kie"
+    tasks: List[Dict[str, Any]]
+    kie_credits: Optional[float] = None
+    creditsConsumed: Optional[float] = None
+    cost_authoritative: bool
+    billing_pending: bool
+    cost: Optional[float] = None
+    cost_usd: Optional[float] = None
+
+
+class WokeyImageUsage(BaseLiteLLMOpenAIResponseObject):
+    """Settled Wokey per-image USD, consumed by gateway/media billing readers."""
+
+    provider: Literal["wokey"] = "wokey"
+    cost_authoritative: bool
+    billing_pending: bool
+    cost: Optional[float] = None
+    cost_usd: Optional[float] = None
+
+
 class ImageResponse(OpenAIImageResponse, BaseLiteLLMOpenAIResponseObject):
     _hidden_params: dict = {}
 
-    usage: Optional[ImageUsage] = None  # type: ignore
+    usage: Optional[Union[ImageUsage, KieImageUsage, WokeyImageUsage]] = None  # type: ignore
     """
     Users might use litellm with older python versions, we don't want this to break for them.
     Happens when their OpenAIImageResponse has the old OpenAI usage class.
@@ -2297,7 +2326,7 @@ class ImageResponse(OpenAIImageResponse, BaseLiteLLMOpenAIResponseObject):
         created: Optional[int] = None,
         data: Optional[List[ImageObject]] = None,
         response_ms=None,
-        usage: Optional[ImageUsage] = None,
+        usage: Optional[Union[ImageUsage, KieImageUsage, WokeyImageUsage]] = None,
         hidden_params: Optional[dict] = None,
         **kwargs,
     ):
@@ -3162,6 +3191,8 @@ class LlmProviders(str, Enum):
     HUGGINGFACE = "huggingface"
     TOGETHER_AI = "together_ai"
     OPENROUTER = "openrouter"
+    KIE = "kie"
+    WOKEY = "wokey"
     DATAROBOT = "datarobot"
     VERTEX_AI = "vertex_ai"
     VERTEX_AI_BETA = "vertex_ai_beta"

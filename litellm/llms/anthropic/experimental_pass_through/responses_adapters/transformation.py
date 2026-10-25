@@ -209,14 +209,20 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
     @staticmethod
     def translate_tool_choice_to_responses_api(
         tool_choice: AnthropicMessagesToolChoice,
-    ) -> Dict[str, Any]:
-        """Convert Anthropic tool_choice to Responses API tool_choice."""
+    ) -> Union[str, Dict[str, Any]]:
+        """Map choice for the shared sync/async messages-to-Responses builder.
+
+        Responses uses strings for selection modes and a flat object for named
+        functions; parallel-tool policy belongs on the enclosing request.
+        """
         tc_type = tool_choice.get("type")
         if tc_type == "any":
-            return {"type": "required"}
+            return "required"
         elif tc_type == "tool":
             return {"type": "function", "name": tool_choice.get("name", "")}
-        return {"type": "auto"}
+        elif tc_type == "none":
+            return "none"
+        return "auto"
 
     @staticmethod
     def translate_context_management_to_responses_api(
@@ -286,6 +292,10 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
         """
         Translate a full Anthropic /v1/messages request dict to
         litellm.responses() / litellm.aresponses() kwargs.
+
+        Both streaming modes use this builder. Invert Anthropic's nested parallel
+        prohibition into OpenAI's top-level allowance only when explicitly set,
+        preserving the upstream default when the option is absent.
         """
         model: str = anthropic_request["model"]
         messages_list = cast(
@@ -342,6 +352,10 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
             ] = self.translate_tool_choice_to_responses_api(
                 cast(AnthropicMessagesToolChoice, tool_choice)
             )
+            if "disable_parallel_tool_use" in tool_choice:
+                responses_kwargs["parallel_tool_calls"] = not tool_choice[
+                    "disable_parallel_tool_use"
+                ]
 
         # thinking -> reasoning
         thinking = anthropic_request.get("thinking")
@@ -480,11 +494,16 @@ class LiteLLMAnthropicToResponsesAPIAdapter:
         raw_usage: Optional[ResponseAPIUsage] = response.usage
         input_tokens = int(getattr(raw_usage, "input_tokens", 0) or 0)
         output_tokens = int(getattr(raw_usage, "output_tokens", 0) or 0)
+        input_details = getattr(raw_usage, "input_tokens_details", None)
+        cache_read_tokens = int(getattr(input_details, "cached_tokens", 0) or 0)
 
         anthropic_usage = AnthropicUsage(
-            input_tokens=input_tokens,
+            # Responses input is inclusive; Anthropic input excludes cache reads.
+            input_tokens=max(0, input_tokens - cache_read_tokens),
             output_tokens=output_tokens,
         )
+        if cache_read_tokens:
+            anthropic_usage["cache_read_input_tokens"] = cache_read_tokens
 
         return AnthropicMessagesResponse(
             id=response.id,

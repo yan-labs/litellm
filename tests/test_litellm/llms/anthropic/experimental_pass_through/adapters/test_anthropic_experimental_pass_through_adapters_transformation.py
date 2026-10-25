@@ -1420,6 +1420,24 @@ def test_cache_control_not_preserved_in_tools_for_non_claude():
     assert "cache_control" not in result[0]
 
 
+def test_translate_anthropic_tools_to_openai_fills_missing_tool_name():
+    """Schema-only tools (no ``name``) must not crash the Converse adapter path."""
+    tools = [
+        {
+            "input_schema": {
+                "type": "object",
+                "properties": {"q": {"type": "string"}},
+                "required": ["q"],
+            },
+        },
+        {"name": "", "input_schema": {"type": "object", "properties": {}}},
+    ]
+    adapter = LiteLLMAnthropicMessagesAdapter()
+    result, _ = adapter.translate_anthropic_tools_to_openai(tools=tools, model=None)
+    assert result[0]["function"]["name"] == "litellm_unnamed_tool_0"
+    assert result[1]["function"]["name"] == "litellm_unnamed_tool_1"
+
+
 def test_translate_openai_content_to_anthropic_reasoning_content_without_thinking_blocks():
     """
     Test that reasoning_content is converted to thinking block when thinking_blocks is not present.
@@ -2111,3 +2129,109 @@ class TestTranslateAnthropicOutputFormatToOpenAI:
         assert self.adapter.translate_anthropic_output_format_to_openai("invalid") is None
         assert self.adapter.translate_anthropic_output_format_to_openai({"type": "text"}) is None
         assert self.adapter.translate_anthropic_output_format_to_openai({"type": "json_schema"}) is None
+
+
+class TestCacheTokenPassthrough:
+    """Test that cache tokens are properly passed through from OpenAI-format responses
+    to Anthropic-format streaming events (issue #193: llm.kollab.im cache usage passthrough)."""
+
+    def setup_method(self):
+        self.adapter = LiteLLMAnthropicMessagesAdapter()
+
+    def _make_streaming_chunk(self, usage_kwargs: dict) -> "ModelResponseStream":
+        """Create a ModelResponseStream with finish_reason and usage data."""
+        from litellm.types.utils import ModelResponseStream
+
+        return ModelResponseStream(
+            id="chatcmpl-test",
+            object="chat.completion.chunk",
+            created=1700000000,
+            model="openrouter/moonshotai/kimi-k2.5",
+            choices=[
+                StreamingChoices(
+                    finish_reason="stop",
+                    index=0,
+                    delta=Delta(content=None),
+                )
+            ],
+            usage=Usage(**usage_kwargs),
+        )
+
+    def test_cache_creation_from_anthropic_private_attr(self):
+        """cache_creation_input_tokens should be extracted from _cache_creation_input_tokens
+        (Anthropic-format responses that set the private attribute directly)."""
+        chunk = self._make_streaming_chunk({
+            "prompt_tokens": 7409,
+            "completion_tokens": 128,
+            "total_tokens": 7537,
+            "cache_creation_input_tokens": 7390,
+        })
+        result = self.adapter.translate_streaming_openai_response_to_anthropic(
+            response=chunk, current_content_block_index=0
+        )
+        assert result["type"] == "message_delta"
+        assert result["usage"]["cache_creation_input_tokens"] == 7390
+
+    def test_cache_creation_from_prompt_tokens_details(self):
+        """cache_creation_input_tokens should fall back to
+        prompt_tokens_details.cache_creation_tokens (OpenAI-format responses)."""
+        chunk = self._make_streaming_chunk({
+            "prompt_tokens": 7409,
+            "completion_tokens": 128,
+            "total_tokens": 7537,
+            "prompt_tokens_details": {"cache_creation_tokens": 7390},
+        })
+        result = self.adapter.translate_streaming_openai_response_to_anthropic(
+            response=chunk, current_content_block_index=0
+        )
+        assert result["type"] == "message_delta"
+        assert result["usage"].get("cache_creation_input_tokens") == 7390
+
+    def test_cache_read_from_prompt_tokens_details(self):
+        """cache_read_input_tokens should be extracted from
+        prompt_tokens_details.cached_tokens (standard OpenAI field)."""
+        chunk = self._make_streaming_chunk({
+            "prompt_tokens": 7531,
+            "completion_tokens": 104,
+            "total_tokens": 7635,
+            "prompt_tokens_details": {"cached_tokens": 7520},
+        })
+        result = self.adapter.translate_streaming_openai_response_to_anthropic(
+            response=chunk, current_content_block_index=0
+        )
+        assert result["type"] == "message_delta"
+        assert result["usage"]["cache_read_input_tokens"] == 7520
+        # input_tokens should exclude cached tokens
+        assert result["usage"]["input_tokens"] == 7531 - 7520
+
+    def test_no_cache_tokens_omitted(self):
+        """When no cache tokens are present, fields should be absent from usage."""
+        chunk = self._make_streaming_chunk({
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+        })
+        result = self.adapter.translate_streaming_openai_response_to_anthropic(
+            response=chunk, current_content_block_index=0
+        )
+        assert result["type"] == "message_delta"
+        assert "cache_creation_input_tokens" not in result["usage"]
+        assert "cache_read_input_tokens" not in result["usage"]
+
+    def test_both_cache_creation_and_read(self):
+        """Both cache_creation and cache_read should be present when both are returned."""
+        chunk = self._make_streaming_chunk({
+            "prompt_tokens": 8000,
+            "completion_tokens": 104,
+            "total_tokens": 8104,
+            "prompt_tokens_details": {
+                "cached_tokens": 6584,
+                "cache_creation_tokens": 806,
+            },
+        })
+        result = self.adapter.translate_streaming_openai_response_to_anthropic(
+            response=chunk, current_content_block_index=0
+        )
+        assert result["type"] == "message_delta"
+        assert result["usage"]["cache_creation_input_tokens"] == 806
+        assert result["usage"]["cache_read_input_tokens"] == 6584

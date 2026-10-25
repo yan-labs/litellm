@@ -161,10 +161,19 @@ def get_llm_provider(  # noqa: PLR0915
         # Native OpenRouter models have IDs like "openrouter/free" where the
         # "openrouter/" prefix is part of the actual model name on the API.
         # When called from a bridge (e.g. anthropic_messages adapter),
-        # custom_llm_provider is already resolved, so return early to prevent
-        # the provider-list stripping below from removing the prefix.
+        # custom_llm_provider is already resolved. Preserve native ids like
+        # "openrouter/free", but normalize provider-prefixed models like
+        # "openrouter/moonshotai/kimi-k2.5" back to "moonshotai/kimi-k2.5"
+        # before sending the upstream request.
         if custom_llm_provider == "openrouter" and model.startswith("openrouter/"):
-            return model, custom_llm_provider, dynamic_api_key, api_base
+            if model.count("/") == 1:
+                return model, custom_llm_provider, dynamic_api_key, api_base
+            return (
+                model.split("/", 1)[1],
+                custom_llm_provider,
+                dynamic_api_key,
+                api_base,
+            )
 
         if api_key and api_key.startswith("os.environ/"):
             dynamic_api_key = get_secret_str(api_key)

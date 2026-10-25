@@ -1,3 +1,10 @@
+"""Transform OpenAI-compatible transcription requests and responses.
+
+The OpenAI provider layer also serves Tokyo's managed OpenRouter audio route.
+That route keeps OpenRouter's broadly supported JSON response contract instead
+of requesting OpenAI-only duration metadata from every upstream model.
+"""
+
 from typing import List, Optional, Union
 
 from httpx import Headers, Response
@@ -7,6 +14,7 @@ from litellm.llms.base_llm.audio_transcription.transformation import (
     BaseAudioTranscriptionConfig,
 )
 from litellm.llms.base_llm.chat.transformation import BaseLLMException
+from litellm.llms.openrouter.audio_catalog import is_openrouter_api_base
 from litellm.secret_managers.main import get_secret_str
 from litellm.types.llms.openai import (
     AllMessageValues,
@@ -102,17 +110,25 @@ class OpenAIWhisperAudioTranscriptionConfig(BaseAudioTranscriptionConfig):
         optional_params: dict,
         litellm_params: dict,
     ) -> AudioTranscriptionRequestData:
-        """
-        Transform the audio transcription request
+        """Build the upstream multipart fields for OpenAI-compatible STT.
+
+        Native OpenAI requests ask for ``verbose_json`` so LiteLLM can recover
+        duration for local cost calculation. OpenRouter exposes many providers
+        that accept only ``json``; the gateway passes the resolved API base in
+        ``litellm_params`` so those models keep the portable response format.
         """
         data = {"model": model, "file": audio_file, **optional_params}
 
-        if "response_format" not in data or (
-            data["response_format"] == "text" or data["response_format"] == "json"
-        ):
-            data[
-                "response_format"
-            ] = "verbose_json"  # ensures 'duration' is received - used for cost calculation
+        if is_openrouter_api_base(litellm_params.get("api_base")):
+            if "response_format" not in data:
+                data["response_format"] = "json"
+        elif "response_format" not in data or data["response_format"] in {
+            "text",
+            "json",
+        }:
+            data["response_format"] = (
+                "verbose_json"  # ensures 'duration' is received - used for cost calculation
+            )
 
         return AudioTranscriptionRequestData(
             data=data,

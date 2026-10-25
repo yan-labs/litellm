@@ -1,6 +1,7 @@
-# What is this?
-## httpx client for vertex ai calls
-## Initial implementation - covers gemini + image gen calls
+"""Vertex/Gemini gateway protocol conversion used by managed chat and image requests.
+
+Thinking levels apply to Gemini 3 and Argon; Argon has no thinkingBudget protocol.
+"""
 import json
 import time
 from copy import deepcopy
@@ -273,19 +274,8 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
 
     @staticmethod
     def _is_gemini_3_or_newer(model: str) -> bool:
-        """
-        Check if the model is Gemini 3 Pro or newer.
-
-        Gemini 3 models include:
-        - gemini-3-pro-preview
-        - gemini-3-flash
-        - gemini-3-flash-preview (Gemini 3 Flash)
-        - Any future Gemini 3.x models
-        """
-        # Check for Gemini 3 models
-        if "gemini-3" in model:
-            return True
-        return False
+        """Select the thinking-level protocol for Gemini 3 and Gemini 4 routes."""
+        return "gemini-3" in model or "gemini-4-argon" in model
 
     def _supports_penalty_parameters(self, model: str) -> bool:
         # Gemini 3 models do not support penalty parameters
@@ -621,6 +611,41 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         # per Vertex AI API spec: "A Tool object should contain exactly one type of Tool"
         _tools_list: List[Tools] = []
 
+        # Vertex AI constraint: multiple Tool objects in a request must ALL be
+        # search tools. Mixing function declarations with search tools in the
+        # same request causes a 400 error:
+        #   "Multiple tools are supported only when they are all search tools."
+        # When both are present (e.g. deployment config has search tools and
+        # user request adds function calling tools via MCP), drop search tools
+        # and keep function declarations.
+        # Ref: https://github.com/BerriAI/litellm/issues/23337
+        has_search_tools = any(
+            v is not None
+            for v in [
+                googleSearch,
+                googleSearchRetrieval,
+                enterpriseWebSearch,
+                urlContext,
+            ]
+        )
+        # Skip this check when include_server_side_tool_invocations is enabled
+        # (Gemini 3+ supports tool combination natively via PR #24073).
+        server_side_tool_invocations = optional_params.get(
+            "include_server_side_tool_invocations", False
+        )
+        if gtool_func_declarations and has_search_tools and not server_side_tool_invocations:
+            verbose_logger.warning(
+                "Vertex AI does not support mixing function declarations with "
+                "search tools (googleSearch, enterpriseWebSearch, urlContext, "
+                "googleSearchRetrieval) in the same request. Dropping search "
+                "tools and keeping function declarations. To use search tools, "
+                "send a request without function calling tools."
+            )
+            googleSearch = None
+            googleSearchRetrieval = None
+            enterpriseWebSearch = None
+            urlContext = None
+
         # Function declarations can be grouped together in one Tool
         if gtool_func_declarations:
             func_tool = Tools()
@@ -815,7 +840,8 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
         elif reasoning_effort == "low":
             return {"thinkingLevel": "low", "includeThoughts": True}
         elif reasoning_effort == "medium":
-            if is_gemini31pro or is_gemini3flash:
+            # Argon supports MEDIUM; preserving it avoids unexpected HIGH token usage.
+            if is_gemini31pro or is_gemini3flash or (model and "gemini-4-argon" in model.lower()):
                 return {"thinkingLevel": "medium", "includeThoughts": True}
             else:
                 return {"thinkingLevel": "high", "includeThoughts": True}
@@ -2272,6 +2298,39 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
             cumulative_tool_call_index,
         )
 
+    @staticmethod
+    def _ensure_choice_for_content_less_response(
+        model_response: ModelResponse, candidates: Optional[List[Candidates]]
+    ) -> None:
+        """
+        Guarantee a non-streaming response has at least one choice.
+
+        Gemini leaves `content` out of a candidate that produced no output, e.g. a tiny
+        maxOutputTokens fully spent on thinking returns only
+        `{"finishReason": "MAX_TOKENS", "index": 0}`. `_process_candidates` skips such
+        candidates, and every caller that reads `choices[0]` (the Anthropic /v1/messages
+        adapter, OpenAI clients) would then crash with IndexError and a 500. We surface the
+        candidate as an empty assistant message that keeps its mapped finish reason
+        (MAX_TOKENS -> "length"), the same way the streaming parser already treats a final
+        chunk that carries only a finishReason. A response with no candidates at all becomes
+        one empty "stop" choice.
+        """
+        if model_response.choices:
+            return
+
+        for idx, candidate in enumerate(candidates or [{}]):
+            model_response.choices.append(  # type: ignore[arg-type]
+                litellm.Choices(
+                    finish_reason=VertexGeminiConfig._check_finish_reason(
+                        None, candidate.get("finishReason")  # type: ignore[attr-defined]
+                    ),
+                    index=candidate.get("index", idx),  # type: ignore[attr-defined]
+                    message={"role": "assistant"},  # type: ignore[arg-type]
+                    logprobs=None,
+                    enhancements=None,
+                )
+            )
+
     def transform_response(
         self,
         model: str,
@@ -2374,6 +2433,10 @@ class VertexGeminiConfig(VertexAIBaseConfig, BaseConfig):
                 ) = VertexGeminiConfig._process_candidates(
                     _candidates, model_response, logging_obj.optional_params
                 )
+
+            VertexGeminiConfig._ensure_choice_for_content_less_response(
+                model_response=model_response, candidates=_candidates
+            )
 
             usage = VertexGeminiConfig._calculate_usage(
                 completion_response=completion_response

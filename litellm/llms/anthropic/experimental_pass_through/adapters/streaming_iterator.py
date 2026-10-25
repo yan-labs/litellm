@@ -1,5 +1,7 @@
-# What is this?
-## Translates OpenAI call to Anthropic `/v1/messages` format
+"""Convert OpenAI streams to native Anthropic events for messages clients.
+
+Per-request refusal state preserves delta.refusal through the final stop chunk.
+"""
 import json
 import traceback
 from collections import deque
@@ -7,6 +9,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, Iterator, Literal, O
 
 from litellm import verbose_logger
 from litellm._uuid import uuid
+from litellm.llms.anthropic.experimental_pass_through.utils import extract_cache_tokens
 from litellm.types.llms.anthropic import UsageDelta
 from litellm.types.utils import AdapterCompletionStreamWrapper
 
@@ -41,7 +44,10 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         type="text",
         text="",
     )
-    chunk_queue: deque = deque()  # Queue for buffering multiple chunks
+    # Buffer for events produced together (e.g. content_block_stop + content_block_start).
+    # Must be created per instance in __init__: a class-level deque would be shared by
+    # every concurrent stream and leak one request's events into another's response.
+    chunk_queue: deque
 
     def __init__(
         self,
@@ -49,10 +55,20 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
         model: str,
         tool_name_mapping: Optional[Dict[str, str]] = None,
     ):
+        """Own all stream state per request, including refusal identity and block queue."""
         super().__init__(completion_stream)
+        self.saw_refusal = False
+        self.chunk_queue = deque()
         self.model = model
         # Mapping of truncated tool names to original names (for OpenAI's 64-char limit)
         self.tool_name_mapping = tool_name_mapping or {}
+
+    def _preserve_refusal(self, chunk):
+        """Carry protocol delta.refusal to the final reason, never inspect text."""
+        for choice in chunk.choices:
+            self.saw_refusal |= bool(getattr(choice.delta, "refusal", None))
+            if self.saw_refusal and choice.finish_reason is not None:
+                choice.finish_reason = "content_filter"
 
     def _create_initial_usage_delta(self) -> UsageDelta:
         """
@@ -118,6 +134,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                 if chunk == "None" or chunk is None:
                     raise Exception
 
+                self._preserve_refusal(chunk)
                 should_start_new_block = self._should_start_new_content_block(chunk)
                 if should_start_new_block:
                     self._increment_content_block_index()
@@ -129,14 +146,22 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
 
                 if should_start_new_block and not self.sent_content_block_finish:
                     # Queue the sequence: content_block_stop -> content_block_start
-                    # The trigger chunk itself is not emitted as a delta since the
-                    # content_block_start already carries the relevant information.
+                    # For text blocks the trigger chunk is not emitted as a separate
+                    # delta because content_block_start carries the information.
+                    # For tool_use blocks we must also emit the trigger chunk's delta
+                    # when it carries input_json_delta data, because some providers
+                    # (e.g. xAI, Gemini) include tool arguments in the same streaming
+                    # chunk as the function name/id.
+
+                    # 1. Stop current content block
                     self.chunk_queue.append(
                         {
                             "type": "content_block_stop",
                             "index": max(self.current_content_block_index - 1, 0),
                         }
                     )
+
+                    # 2. Start new content block
                     self.chunk_queue.append(
                         {
                             "type": "content_block_start",
@@ -144,6 +169,17 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                             "content_block": self.current_content_block_start,
                         }
                     )
+
+                    # 3. If the trigger chunk carries tool argument data, queue it
+                    # so the input_json_delta is not silently dropped.
+                    if (
+                        processed_chunk.get("type") == "content_block_delta"
+                        and isinstance(processed_chunk.get("delta"), dict)
+                        and processed_chunk["delta"].get("type") == "input_json_delta"
+                        and processed_chunk["delta"].get("partial_json")
+                    ):
+                        self.chunk_queue.append(processed_chunk)
+
                     self.sent_content_block_finish = False
                     return self.chunk_queue.popleft()
 
@@ -206,6 +242,16 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
 
             # Queue initial chunks if not sent yet
             if self.sent_first_chunk is False:
+                # Read upstream before synthetic events commit the proxy's HTTP 200.
+                upstream = self.completion_stream.__aiter__()
+                first_chunk = await upstream.__anext__()
+
+                async def buffered_stream():
+                    yield first_chunk
+                    async for chunk in upstream:
+                        yield chunk
+
+                self.completion_stream = buffered_stream()
                 self.sent_first_chunk = True
                 self.chunk_queue.append(
                     {
@@ -240,6 +286,7 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                     raise Exception
 
                 # Check if we need to start a new content block
+                self._preserve_refusal(chunk)
                 should_start_new_block = self._should_start_new_content_block(chunk)
                 if should_start_new_block:
                     self._increment_content_block_index()
@@ -260,38 +307,17 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                         merged_chunk["delta"] = {}
 
                     # Add usage to the held chunk
-                    uncached_input_tokens = chunk.usage.prompt_tokens or 0
-                    if (
-                        hasattr(chunk.usage, "prompt_tokens_details")
-                        and chunk.usage.prompt_tokens_details
-                    ):
-                        cached_tokens = (
-                            getattr(
-                                chunk.usage.prompt_tokens_details, "cached_tokens", 0
-                            )
-                            or 0
-                        )
-                        uncached_input_tokens -= cached_tokens
+                    cache_creation, cache_read = extract_cache_tokens(chunk.usage)
+                    uncached_input_tokens = (chunk.usage.prompt_tokens or 0) - cache_read
 
                     usage_dict: UsageDelta = {
                         "input_tokens": uncached_input_tokens,
                         "output_tokens": chunk.usage.completion_tokens or 0,
                     }
-                    # Add cache tokens if available (for prompt caching support)
-                    if (
-                        hasattr(chunk.usage, "_cache_creation_input_tokens")
-                        and chunk.usage._cache_creation_input_tokens > 0
-                    ):
-                        usage_dict[
-                            "cache_creation_input_tokens"
-                        ] = chunk.usage._cache_creation_input_tokens
-                    if (
-                        hasattr(chunk.usage, "_cache_read_input_tokens")
-                        and chunk.usage._cache_read_input_tokens > 0
-                    ):
-                        usage_dict[
-                            "cache_read_input_tokens"
-                        ] = chunk.usage._cache_read_input_tokens
+                    if cache_creation > 0:
+                        usage_dict["cache_creation_input_tokens"] = cache_creation
+                    if cache_read > 0:
+                        usage_dict["cache_read_input_tokens"] = cache_read
                     merged_chunk["usage"] = usage_dict
 
                     # Queue the merged chunk and reset
@@ -305,8 +331,12 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                 if not self.queued_usage_chunk:
                     if should_start_new_block and not self.sent_content_block_finish:
                         # Queue the sequence: content_block_stop -> content_block_start
-                        # The trigger chunk itself is not emitted as a delta since the
-                        # content_block_start already carries the relevant information.
+                        # For text blocks the trigger chunk is not emitted as a separate
+                        # delta because content_block_start carries the information.
+                        # For tool_use blocks we must also emit the trigger chunk's delta
+                        # when it carries input_json_delta data, because some providers
+                        # (e.g. xAI, Gemini) include tool arguments in the same streaming
+                        # chunk as the function name/id.
 
                         # 1. Stop current content block
                         self.chunk_queue.append(
@@ -324,6 +354,17 @@ class AnthropicStreamWrapper(AdapterCompletionStreamWrapper):
                                 "content_block": self.current_content_block_start,
                             }
                         )
+
+                        # 3. If the trigger chunk carries tool argument data, queue it
+                        # so the input_json_delta is not silently dropped.
+                        if (
+                            processed_chunk.get("type") == "content_block_delta"
+                            and isinstance(processed_chunk.get("delta"), dict)
+                            and processed_chunk["delta"].get("type")
+                            == "input_json_delta"
+                            and processed_chunk["delta"].get("partial_json")
+                        ):
+                            self.chunk_queue.append(processed_chunk)
 
                         # Reset state for new block
                         self.sent_content_block_finish = False

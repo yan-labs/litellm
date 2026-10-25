@@ -75,7 +75,7 @@ from litellm import (
     ModelResponseStream,
     Router,
 )
-from litellm._logging import verbose_proxy_logger
+from litellm._logging import _redact_string, verbose_proxy_logger
 from litellm._service_logger import ServiceLogging, ServiceTypes
 from litellm.caching.caching import DualCache, RedisCache
 from litellm.caching.dual_cache import LimitedSizeOrderedDict
@@ -153,7 +153,7 @@ def print_verbose(print_statement):
 
     verbose_proxy_logger.debug("{}\n{}".format(print_statement, traceback.format_exc()))
     if litellm.set_verbose:
-        print(f"LiteLLM Proxy: {print_statement}")  # noqa
+        print(f"LiteLLM Proxy: {_redact_string(str(print_statement))}")  # noqa
 
 
 def _get_email_logger_class():
@@ -1654,6 +1654,7 @@ class ProxyLogging:
             error_message = str(original_exception)
         if isinstance(traceback_str, str):
             error_message += traceback_str[:1000]
+        error_message = _redact_string(error_message)
         asyncio.create_task(
             self.alerting_handler(
                 message=f"DB read/write call failed: {error_message}",
@@ -1724,7 +1725,7 @@ class ProxyLogging:
 
             asyncio.create_task(
                 self.alerting_handler(
-                    message=f"LLM API call failed: `{exception_str}`",
+                    message=_redact_string(f"LLM API call failed: `{exception_str}`"),
                     level="High",
                     alert_type=AlertType.llm_exceptions,
                     request_data=request_data,
@@ -4003,7 +4004,19 @@ class PrismaClient:
                         "DATABASE_URL not set; cannot recreate Prisma client."
                     )
                     raise RuntimeError("DATABASE_URL not set")
-                await self.db.recreate_prisma_client(db_url)
+                # Keep at least half of the reconnect budget available for
+                # constructing and connecting the replacement client. A dead
+                # query engine can otherwise make Prisma.disconnect() consume
+                # the whole budget and leave the wrapper permanently bound to
+                # the dead client.
+                disconnect_timeout_seconds = min(
+                    5.0,
+                    max(0.25, effective_timeout / 2),
+                )
+                await self.db.recreate_prisma_client(
+                    db_url,
+                    disconnect_timeout_seconds=disconnect_timeout_seconds,
+                )
                 await self._start_engine_watcher()
 
             await asyncio.wait_for(_do_heavy_reconnect(), timeout=effective_timeout)
@@ -5139,6 +5152,22 @@ def _get_docs_url() -> Optional[str]:
         return None
 
     return "/"
+
+def _get_openapi_url() -> Optional[str]:
+    """
+    Get the OpenAPI JSON URL from the environment variables.
+
+    - If OPENAPI_URL is set, return it.
+    - If NO_OPENAPI is True, return None.
+    - Otherwise, default to "/openapi.json".
+    """
+    if openapi_url := os.getenv("OPENAPI_URL"):
+        return openapi_url
+
+    if str_to_bool(os.getenv("NO_OPENAPI")) is True:
+        return None
+
+    return "/openapi.json"
 
 
 def handle_exception_on_proxy(e: Exception) -> ProxyException:

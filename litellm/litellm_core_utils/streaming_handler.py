@@ -1,3 +1,7 @@
+"""Shared model streaming normalization and terminal-error handling.
+
+Provider refusals bypass mid-stream fallback for both sync and async consumers.
+"""
 import asyncio
 import collections.abc
 import datetime
@@ -1278,9 +1282,9 @@ class CustomStreamWrapper:
                             and chunk.candidates[0].finish_reason.name  # type: ignore
                             != "FINISH_REASON_UNSPECIFIED"
                         ):  # every non-final chunk in vertex ai has this
-                            self.received_finish_reason = chunk.candidates[  # type: ignore
-                                0
-                            ].finish_reason.name
+                            self.received_finish_reason = map_finish_reason(  # type: ignore
+                                chunk.candidates[0].finish_reason.name
+                            )
                     except Exception:
                         if chunk.candidates[0].finish_reason.name == "SAFETY":  # type: ignore
                             raise Exception(
@@ -2248,6 +2252,12 @@ class CustomStreamWrapper:
         """
         from litellm.exceptions import MidStreamFallbackError
 
+        # Keep a structured refusal terminal even when its HTTP status is 5xx.
+        from litellm.litellm_core_utils.upstream_refusal import mapped_refusal
+
+        terminal = mapped_refusal(e, self.model, self.custom_llm_provider)
+        if terminal is not None:
+            raise terminal
         # Map to OpenAI exception format
         if isinstance(e, OpenAIError):
             mapped_exception: Exception = e

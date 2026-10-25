@@ -265,10 +265,13 @@ export default function ModelInfoView({
       if (values.guardrails) {
         updatedLitellmParams.guardrails = values.guardrails;
       }
-      if (values.vector_store_ids !== undefined) {
-        updatedLitellmParams.vector_store_ids = Array.isArray(values.vector_store_ids)
-          ? values.vector_store_ids
-          : [];
+      const vectorStoreIds = Array.isArray(values.vector_store_ids)
+        ? values.vector_store_ids.filter(Boolean)
+        : [];
+      if (vectorStoreIds.length > 0) {
+        updatedLitellmParams.vector_store_ids = vectorStoreIds;
+      } else {
+        delete updatedLitellmParams.vector_store_ids;
       }
 
       // Handle cache control settings
@@ -370,6 +373,7 @@ export default function ModelInfoView({
           model: localModelData.litellm_model_name,
         },
         {
+          id: localModelData.model_info?.id,
           mode: localModelData.model_info?.mode,
         },
         localModelData.model_info?.mode,

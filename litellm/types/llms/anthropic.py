@@ -1,3 +1,7 @@
+"""Anthropic wire types used by native Messages and the OpenAI bridge.
+
+Finish reasons include the upstream terminal refusal signal.
+"""
 from enum import Enum
 from typing import Any, Dict, Iterable, List, Optional, Union
 
@@ -573,7 +577,7 @@ class AnthropicResponseUsageBlock(BaseModel):
     output_tokens: int
 
 
-AnthropicFinishReason = Literal["end_turn", "max_tokens", "stop_sequence", "tool_use"]
+AnthropicFinishReason = Literal["end_turn", "max_tokens", "stop_sequence", "tool_use", "refusal"]
 
 
 class AnthropicResponse(BaseModel):

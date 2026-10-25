@@ -2,6 +2,7 @@ import copy
 import json
 import os
 import sys
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -900,6 +901,161 @@ async def test_router_ageneric_api_call_with_fallbacks_helper():
                     assert "Mock failure" in str(exc_info.value)
                     # Check that fail_calls was incremented
                     assert router.fail_calls["gpt-3.5-turbo"] == initial_fail_count + 1
+
+
+@pytest.mark.asyncio
+async def test_ageneric_router_refreshes_precreated_logging_with_deployment_pricing():
+    """A proxy-created logger must bill with the deployment selected afterwards."""
+    from unittest.mock import AsyncMock, patch
+
+    from litellm.litellm_core_utils.litellm_logging import Logging
+    from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import (
+        AnthropicPassthroughLoggingHandler,
+    )
+    from litellm.types.utils import ModelResponse
+
+    model_id = "vision-router-pricing"
+    attacker_model_id = "request-controlled-pricing"
+    known_low_price_model_id = "known-low-price-deployment"
+    input_cost = 0.00000014
+    output_cost = 0.00000028
+    router = litellm.Router(
+        model_list=[
+            {
+                "model_name": "deepseek-v4-flash-vision-exp",
+                "litellm_params": {
+                    "model": "anthropic/deepseek-v4-flash-vision-exp",
+                    "api_key": "test-key",
+                    "api_base": "https://api.deepseek.com/anthropic",
+                },
+                "model_info": {
+                    "id": model_id,
+                    "input_cost_per_token": input_cost,
+                    "output_cost_per_token": output_cost,
+                },
+            }
+        ]
+    )
+    logging_obj = Logging(
+        model="deepseek-v4-flash-vision-exp",
+        messages=[{"role": "user", "content": "test"}],
+        stream=True,
+        call_type="anthropic_messages",
+        start_time=time.time(),
+        litellm_call_id="pre-router-logger",
+        function_id="proxy-endpoint",
+    )
+    # Dynamic DB reloads can leave the global cost map without the selected
+    # deployment even though Router state already contains its current prices.
+    litellm.model_cost.pop(model_id, None)
+    litellm.model_cost.pop(attacker_model_id, None)
+    litellm.register_model(
+        model_cost={
+            known_low_price_model_id: {
+                "input_cost_per_token": 0,
+                "output_cost_per_token": 0,
+            }
+        }
+    )
+
+    async def capture_logging_state(**kwargs):
+        selected_logging_obj = kwargs["litellm_logging_obj"]
+        selected_logging_obj.model_call_details["custom_llm_provider"] = "anthropic"
+        selected_router_metadata = selected_logging_obj.litellm_params[
+            "litellm_metadata"
+        ]["model_info"]
+        # Anthropic provider adapters are allowed to consume request metadata.
+        # Cost tracking must retain the trusted Router deployment independently.
+        selected_logging_obj.update_from_kwargs(
+            kwargs={
+                "litellm_metadata": {},
+                "metadata": {
+                    "model_info": {
+                        "id": known_low_price_model_id,
+                        "input_cost_per_token": 0,
+                        "output_cost_per_token": 0,
+                    }
+                },
+            },
+            litellm_params={
+                "preset_cache_key": None,
+                "stream_response": {},
+                "model_info": {
+                    "id": known_low_price_model_id,
+                    "input_cost_per_token": 0,
+                    "output_cost_per_token": 0,
+                },
+            },
+            model="deepseek-v4-flash-vision-exp",
+        )
+        response = ModelResponse()
+        response.usage = {"prompt_tokens": 10, "completion_tokens": 5}  # type: ignore
+        cost_payload = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+            litellm_model_response=response,
+            model="deepseek-v4-flash-vision-exp",
+            kwargs={},
+            start_time=time.time(),
+            end_time=time.time(),
+            logging_obj=selected_logging_obj,
+        )
+        return {
+            "router_model_id": selected_logging_obj.get_router_model_id(),
+            "litellm_params": selected_logging_obj.litellm_params,
+            "selected_router_metadata": selected_router_metadata,
+            "response_cost": cost_payload.get("response_cost"),
+        }
+
+    try:
+        with patch("litellm.register_model", wraps=litellm.register_model) as register_model, patch.object(
+            router, "async_routing_strategy_pre_call_checks", new=AsyncMock()
+        ), patch.object(router, "_get_client", return_value=None):
+            result = await router._ageneric_api_call_with_fallbacks(
+                model="deepseek-v4-flash-vision-exp",
+                original_function=capture_logging_state,
+                messages=[{"role": "user", "content": "test"}],
+                max_tokens=16,
+                stream=True,
+                litellm_logging_obj=logging_obj,
+                litellm_metadata={
+                    "model_info": {
+                        "id": attacker_model_id,
+                        "input_cost_per_token": 0,
+                        "output_cost_per_token": 0,
+                    }
+                },
+            )
+            repeated_result = await router._ageneric_api_call_with_fallbacks(
+                model="deepseek-v4-flash-vision-exp",
+                original_function=capture_logging_state,
+                messages=[{"role": "user", "content": "test again"}],
+                max_tokens=16,
+                stream=True,
+                litellm_logging_obj=logging_obj,
+            )
+            assert register_model.call_count == 1
+            assert attacker_model_id not in litellm.model_cost
+    finally:
+        litellm.model_cost.pop(model_id, None)
+        litellm.model_cost.pop(attacker_model_id, None)
+        litellm.model_cost.pop(known_low_price_model_id, None)
+
+    assert result["router_model_id"] == model_id
+    selected_model_info = result["selected_router_metadata"]
+    assert selected_model_info["input_cost_per_token"] == input_cost
+    assert selected_model_info["output_cost_per_token"] == output_cost
+    trusted_model_info = result["litellm_params"]["model_info"]
+    assert trusted_model_info["id"] == model_id
+    assert trusted_model_info["input_cost_per_token"] == input_cost
+    assert trusted_model_info["output_cost_per_token"] == output_cost
+    assert result["litellm_params"]["litellm_metadata"] == {}
+    assert (
+        result["litellm_params"]["metadata"]["model_info"]["id"]
+        == known_low_price_model_id
+    )
+    assert result["response_cost"] == pytest.approx(
+        (10 * input_cost) + (5 * output_cost)
+    )
+    assert repeated_result["response_cost"] == result["response_cost"]
 
 
 def test_router_get_model_access_groups_team_only_models():

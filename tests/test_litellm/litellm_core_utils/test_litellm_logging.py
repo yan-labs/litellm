@@ -184,6 +184,21 @@ def test_use_custom_pricing_not_detected_litellm_metadata_no_pricing():
     assert use_custom_pricing_for_model(litellm_params) is False
 
 
+def test_use_custom_pricing_for_model_via_top_level_model_info():
+    """Generic provider adapters may preserve router pricing only at model_info."""
+    from litellm.litellm_core_utils.litellm_logging import \
+        use_custom_pricing_for_model
+
+    litellm_params = {
+        "model_info": {
+            "id": "vision-custom-pricing",
+            "input_cost_per_token": 0.00000014,
+            "output_cost_per_token": 0.00000028,
+        },
+    }
+    assert use_custom_pricing_for_model(litellm_params) is True
+
+
 def test_response_cost_calculator_uses_router_model_id_from_litellm_metadata():
     """_response_cost_calculator should extract router_model_id from
     litellm_params.litellm_metadata.model_info.id when the result object
@@ -294,6 +309,13 @@ class TestGetRouterModelId:
         }
         assert logging_obj.get_router_model_id() == "from-litellm-meta"
 
+    def test_falls_back_to_top_level_model_info(self, logging_obj):
+        """Generic router calls also expose the selected deployment at model_info."""
+        logging_obj.litellm_params = {
+            "model_info": {"id": "custom-deploy-direct"},
+        }
+        assert logging_obj.get_router_model_id() == "custom-deploy-direct"
+
     def test_returns_none_when_no_model_info(self, logging_obj):
         """Should return None when no model_info is present."""
         logging_obj.litellm_params = {"api_base": ""}
@@ -374,6 +396,320 @@ class TestAnthropicPassthroughCustomPricing:
             call_kwargs = mock_cost.call_args
             assert call_kwargs.kwargs.get("custom_pricing") is True
             assert call_kwargs.kwargs.get("router_model_id") == "claude-custom-pricing"
+
+    def test_completion_cost_uses_top_level_router_model_info(self):
+        """Top-level router model_info must produce a real non-zero Anthropic cost."""
+        import litellm
+        from litellm.litellm_core_utils.litellm_logging import \
+            Logging as LiteLLMLoggingObj
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import \
+            AnthropicPassthroughLoggingHandler
+
+        model_id = "vision-custom-pricing-top-level"
+        input_cost = 0.00000014
+        output_cost = 0.00000028
+        model_info = {
+            "id": model_id,
+            "input_cost_per_token": input_cost,
+            "cache_read_input_token_cost": 0.0000000028,
+            "cache_creation_input_token_cost": 0,
+            "output_cost_per_token": output_cost,
+            "litellm_provider": "anthropic",
+        }
+        litellm.register_model(model_cost={model_id: model_info})
+
+        logging_obj = LiteLLMLoggingObj(
+            model="deepseek-v4-flash-vision-exp",
+            messages=[{"role": "user", "content": "Hi"}],
+            stream=True,
+            call_type="anthropic_messages",
+            start_time=time.time(),
+            litellm_call_id="test-top-level-model-info",
+            function_id="test-fn",
+        )
+        logging_obj.update_environment_variables(
+            model="deepseek-v4-flash-vision-exp",
+            user="",
+            optional_params={},
+            litellm_params={
+                "api_base": "",
+                "model_info": model_info,
+            },
+        )
+        logging_obj.model_call_details["custom_llm_provider"] = "anthropic"
+
+        mock_response = ModelResponse()
+        mock_response.usage = {"prompt_tokens": 10, "completion_tokens": 5}  # type: ignore
+
+        try:
+            kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+                litellm_model_response=mock_response,
+                model="deepseek-v4-flash-vision-exp",
+                kwargs={},
+                start_time=time.time(),
+                end_time=time.time(),
+                logging_obj=logging_obj,
+            )
+            assert kwargs["response_cost"] == pytest.approx(
+                (10 * input_cost) + (5 * output_cost)
+            )
+            assert kwargs["response_cost"] > 0
+        finally:
+            litellm.model_cost.pop(model_id, None)
+
+    def test_router_bound_pricing_does_not_require_process_global_registration(self):
+        """A trusted Router binding must price Anthropic usage in any worker process."""
+        import litellm
+        from litellm.litellm_core_utils.litellm_logging import \
+            Logging as LiteLLMLoggingObj
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import \
+            AnthropicPassthroughLoggingHandler
+
+        model_id = "vision-router-bound-without-global-registration"
+        model_info = {
+            "id": model_id,
+            "input_cost_per_token": 0.00000014,
+            "cache_read_input_token_cost": 0.0000000028,
+            "cache_creation_input_token_cost": 0,
+            "output_cost_per_token": 0.00000028,
+            "litellm_provider": "anthropic",
+        }
+        litellm.model_cost.pop(model_id, None)
+        logging_obj = LiteLLMLoggingObj(
+            model="deepseek-v4-flash-vision-exp",
+            messages=[{"role": "user", "content": "Hi"}],
+            stream=True,
+            call_type="anthropic_messages",
+            start_time=time.time(),
+            litellm_call_id="test-router-bound-no-global-model",
+            function_id="test-fn",
+        )
+        logging_obj.bind_router_model_info(model_info)
+        logging_obj.litellm_params.update(
+            {
+                "model_info": {
+                    "id": "attacker-zero-price",
+                    "input_cost_per_token": 0,
+                    "output_cost_per_token": 0,
+                },
+                "metadata": {
+                    "model_info": {
+                        "id": "attacker-zero-price",
+                        "input_cost_per_token": 0,
+                        "output_cost_per_token": 0,
+                    }
+                },
+            }
+        )
+        logging_obj.model_call_details["custom_llm_provider"] = "anthropic"
+
+        mock_response = ModelResponse()
+        mock_response.usage = {  # type: ignore
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "cache_read_input_tokens": 30,
+            "cache_creation_input_tokens": 10,
+        }
+
+        from unittest.mock import patch
+
+        with patch("litellm.completion_cost", wraps=litellm.completion_cost) as mock_cost:
+            kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+                litellm_model_response=mock_response,
+                model="deepseek-v4-flash-vision-exp",
+                kwargs={},
+                start_time=time.time(),
+                end_time=time.time(),
+                logging_obj=logging_obj,
+            )
+
+        mock_cost.assert_called_once()
+        assert kwargs["response_cost"] == pytest.approx(
+            (60 * 0.00000014)
+            + (30 * 0.0000000028)
+            + (10 * 0)
+            + (20 * 0.00000028)
+        )
+        assert logging_obj.model_call_details["response_cost"] == pytest.approx(
+            kwargs["response_cost"]
+        )
+        assert mock_response._hidden_params["response_cost"] == pytest.approx(
+            kwargs["response_cost"]
+        )
+        assert logging_obj._response_cost_calculator(
+            result=mock_response, cache_hit=False
+        ) == pytest.approx(kwargs["response_cost"])
+        assert model_id not in litellm.model_cost
+
+    def test_registered_router_deployment_keeps_standard_cost_calculator(self):
+        """Registered routes retain standard tiered and provider-specific pricing."""
+        import litellm
+        from unittest.mock import patch
+
+        from litellm.litellm_core_utils.litellm_logging import \
+            Logging as LiteLLMLoggingObj
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import \
+            AnthropicPassthroughLoggingHandler
+
+        model_id = "registered-router-pricing"
+        model_info = {
+            "id": model_id,
+            "input_cost_per_token": 0.00000014,
+            "output_cost_per_token": 0.00000028,
+            "litellm_provider": "anthropic",
+        }
+        litellm.model_cost[model_id] = model_info
+        logging_obj = LiteLLMLoggingObj(
+            model="deepseek-v4-flash-vision-exp",
+            messages=[],
+            stream=True,
+            call_type="anthropic_messages",
+            start_time=time.time(),
+            litellm_call_id="test-registered-router-pricing",
+            function_id="test-fn",
+        )
+        logging_obj.bind_router_model_info(model_info)
+        logging_obj.model_call_details["custom_llm_provider"] = "anthropic"
+        response = ModelResponse()
+        response.usage = {"prompt_tokens": 10, "completion_tokens": 5}  # type: ignore
+
+        try:
+            with patch("litellm.completion_cost", return_value=12.5) as mock_cost:
+                kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+                    litellm_model_response=response,
+                    model="deepseek-v4-flash-vision-exp",
+                    kwargs={},
+                    start_time=time.time(),
+                    end_time=time.time(),
+                    logging_obj=logging_obj,
+                )
+            assert kwargs["response_cost"] == 12.5
+            mock_cost.assert_called_once()
+        finally:
+            litellm.model_cost.pop(model_id, None)
+
+    def test_router_bound_fallback_does_not_mask_other_calculator_errors(self):
+        """Only an unmapped-model error may use the request-local price fallback."""
+        from unittest.mock import patch
+
+        from litellm.litellm_core_utils.litellm_logging import \
+            Logging as LiteLLMLoggingObj
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import \
+            AnthropicPassthroughLoggingHandler
+
+        logging_obj = LiteLLMLoggingObj(
+            model="deepseek-v4-flash-vision-exp",
+            messages=[],
+            stream=True,
+            call_type="anthropic_messages",
+            start_time=time.time(),
+            litellm_call_id="test-non-mapping-cost-error",
+            function_id="test-fn",
+        )
+        logging_obj.bind_router_model_info(
+            {
+                "id": "missing-deployment",
+                "input_cost_per_token": 0.1,
+                "output_cost_per_token": 0.2,
+            }
+        )
+        response = ModelResponse()
+        response.usage = {"prompt_tokens": 10, "completion_tokens": 5}  # type: ignore
+
+        with patch("litellm.completion_cost", side_effect=RuntimeError("calculator bug")):
+            with patch.object(
+                AnthropicPassthroughLoggingHandler,
+                "_get_router_bound_response_cost",
+            ) as mock_fallback:
+                kwargs = AnthropicPassthroughLoggingHandler._create_anthropic_response_logging_payload(
+                    litellm_model_response=response,
+                    model="deepseek-v4-flash-vision-exp",
+                    kwargs={},
+                    start_time=time.time(),
+                    end_time=time.time(),
+                    logging_obj=logging_obj,
+                )
+
+        assert "response_cost" not in kwargs
+        mock_fallback.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "bad_prompt", [True, False, -1, float("nan"), float("inf")]
+    )
+    def test_router_bound_pricing_rejects_invalid_prompt_tokens(self, bad_prompt):
+        """The fallback must not coerce invalid usage into a billable number."""
+        from litellm.litellm_core_utils.litellm_logging import \
+            Logging as LiteLLMLoggingObj
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import \
+            AnthropicPassthroughLoggingHandler
+
+        logging_obj = LiteLLMLoggingObj(
+            model="deepseek-v4-flash-vision-exp",
+            messages=[],
+            stream=True,
+            call_type="anthropic_messages",
+            start_time=time.time(),
+            litellm_call_id="test-invalid-router-usage",
+            function_id="test-fn",
+        )
+        logging_obj.bind_router_model_info(
+            {
+                "id": "missing-deployment",
+                "input_cost_per_token": 0.1,
+                "output_cost_per_token": 0.2,
+            }
+        )
+        response = ModelResponse()
+        response.usage = {  # type: ignore
+            "prompt_tokens": bad_prompt,
+            "completion_tokens": 1,
+        }
+
+        assert (
+            AnthropicPassthroughLoggingHandler._get_router_bound_response_cost(
+                litellm_model_response=response,
+                logging_obj=logging_obj,
+            )
+            is None
+        )
+
+    def test_router_bound_pricing_rejects_cache_tokens_above_prompt_total(self):
+        """Cache buckets cannot exceed the provider's total prompt token count."""
+        from litellm.litellm_core_utils.litellm_logging import \
+            Logging as LiteLLMLoggingObj
+        from litellm.proxy.pass_through_endpoints.llm_provider_handlers.anthropic_passthrough_logging_handler import \
+            AnthropicPassthroughLoggingHandler
+
+        logging_obj = LiteLLMLoggingObj(
+            model="deepseek-v4-flash-vision-exp",
+            messages=[],
+            stream=True,
+            call_type="anthropic_messages",
+            start_time=time.time(),
+            litellm_call_id="test-invalid-cache-usage",
+            function_id="test-fn",
+        )
+        logging_obj.bind_router_model_info(
+            {
+                "id": "missing-deployment",
+                "input_cost_per_token": 0.1,
+                "output_cost_per_token": 0.2,
+            }
+        )
+        response = ModelResponse()
+        response.usage = {  # type: ignore
+            "prompt_tokens": 10,
+            "completion_tokens": 1,
+            "cache_read_input_tokens": 11,
+        }
+
+        assert (
+            AnthropicPassthroughLoggingHandler._get_router_bound_response_cost(
+                litellm_model_response=response,
+                logging_obj=logging_obj,
+            )
+            is None
+        )
 
 
 class TestUpdateFromKwargs:

@@ -1,3 +1,10 @@
+"""LiteLLM managed deployment routing, retries and fallback orchestration.
+
+Trusted upstream refusals remain terminal across retry policies and fallbacks.
+Accepted Wokey media jobs remain bound to their encoded provider; submission
+uncertainty cannot trigger a second generation through retry or fallback.
+"""
+
 # +-----------------------------------------------+
 # |                                               |
 # |           Give Feedback / Get Help            |
@@ -43,6 +50,7 @@ from pydantic import BaseModel
 from typing_extensions import overload
 
 import litellm
+from litellm.litellm_core_utils.upstream_refusal import refusal_code, is_refusal_response
 import litellm.litellm_core_utils
 import litellm.litellm_core_utils.exception_mapping_utils
 from litellm import get_secret_str
@@ -1950,6 +1958,8 @@ class Router:
                         "content_policy_fallbacks",
                         router_self.content_policy_fallbacks,
                     )
+                    if refusal_code(e):
+                        raise e
                     initial_kwargs["original_function"] = router_self._completion
                     if e.is_pre_first_chunk or not e.generated_content:
                         initial_kwargs["messages"] = messages
@@ -3836,6 +3846,53 @@ class Router:
                 deployment=deployment, kwargs=kwargs, function_name=function_name
             )
 
+            # Generic endpoint callbacks calculate cost after the provider stream
+            # finishes, potentially long after a DB-backed deployment was added.
+            # Fill a missing/incomplete cost-map entry from the server-selected
+            # deployment so completion_cost can resolve it. Existing complete
+            # entries are left untouched to avoid per-request global cache churn;
+            # request metadata never participates in this registration boundary.
+            selected_model_info = deployment.get("model_info") or {}
+            selected_model_id = selected_model_info.get("id")
+            if isinstance(selected_model_id, str) and selected_model_id:
+                registered_model_info = dict(selected_model_info)
+                selected_litellm_params = deployment.get("litellm_params") or {}
+                pricing_fields = CustomPricingLiteLLMParams.model_fields.keys()
+                for field in pricing_fields:
+                    field_value = selected_litellm_params.get(field)
+                    if field_value is not None:
+                        registered_model_info[field] = field_value
+                required_pricing_fields = {
+                    field
+                    for field in pricing_fields
+                    if registered_model_info.get(field) is not None
+                }
+                existing_model_info = litellm.model_cost.get(selected_model_id)
+                if existing_model_info is None or any(
+                    existing_model_info.get(field) is None
+                    for field in required_pricing_fields
+                ):
+                    litellm.register_model(
+                        model_cost={selected_model_id: registered_model_info}
+                    )
+
+            # Generic proxy endpoints create their Logging object before the
+            # Router selects a deployment. Refresh that existing object after
+            # selection so Anthropic/Responses streaming callbacks can resolve
+            # the server-owned deployment ID and custom prices instead of
+            # calculating against the unmapped public alias.
+            logging_obj = kwargs.get("litellm_logging_obj")
+            if logging_obj is not None:
+                # Bind the server-selected deployment directly to the logger as
+                # trusted internal state. Provider adapters may consume or
+                # reshape their metadata fields before a streaming callback
+                # calculates cost, while model_info here comes only from the
+                # Router selection above. Keeping the canonical deployment on
+                # the logger preserves exact custom pricing without allowing a
+                # request body to supply a deployment id or price.
+                logging_obj.bind_router_model_info(registered_model_info)
+                logging_obj.update_from_kwargs(kwargs=kwargs)
+
             data = deployment["litellm_params"].copy()
             model_name = data["model"]
             self.total_calls[model_name] += 1
@@ -5222,9 +5279,15 @@ class Router:
         """
         Initialize the Interactions API endpoints on the router.
 
-        GET, DELETE, CANCEL Interactions API Requests don't need model-based routing,
-        so we call the original function directly with the custom_llm_provider.
+        Explicit model aliases reuse managed deployment credentials. Requests
+        without an alias retain the existing provider-level behavior.
         """
+        if kwargs.get("model"):
+            return await self._ageneric_api_call_with_fallbacks(
+                original_function=original_function,
+                custom_llm_provider=custom_llm_provider,
+                **kwargs,
+            )
         if custom_llm_provider and "custom_llm_provider" not in kwargs:
             kwargs["custom_llm_provider"] = custom_llm_provider
         # Default to gemini for interactions API
@@ -5273,6 +5336,12 @@ class Router:
         fallback_model_group = None
         original_model_group: Optional[str] = kwargs.get("model")  # type: ignore
         fallback_failure_exception_str = ""
+
+        # Wokey accepted-job reads and ambiguous POSTs must never change upstream.
+        from litellm.llms.wokey.common import is_wokey_job
+
+        if refusal_code(e) or getattr(e, "media_no_resubmit", False) or is_wokey_job(kwargs.get("video_id")):
+            raise e
 
         if disable_fallbacks is True or original_model_group is None:
             raise e
@@ -5417,6 +5486,8 @@ class Router:
 
                 return response
         except Exception as new_exception:
+            if getattr(new_exception, "media_no_resubmit", False):
+                raise
             parent_otel_span = _get_parent_otel_span_from_kwargs(kwargs)
             verbose_router_logger.error(
                 "litellm.router.py::async_function_with_fallbacks() - Error occurred while trying to do fallbacks - {}\n{}\n\nDebug Information:\nCooldown Deployments={}".format(
@@ -5589,6 +5660,9 @@ class Router:
             )
             return response
         except Exception as e:
+            # Retry policies cannot override an uncertain paid media submission.
+            if refusal_code(e) or getattr(e, "media_no_resubmit", False):
+                raise
             current_attempt = None
             original_exception = e
             deployment_num_retries = getattr(e, "num_retries", None)
@@ -5683,6 +5757,9 @@ class Router:
                     return response
 
                 except Exception as e:
+                    # A later attempt may have been accepted even if the first was rejected.
+                    if refusal_code(e) or getattr(e, "media_no_resubmit", False):
+                        raise
                     # Always track the latest error so we raise the most
                     # recent exception instead of the first one.
                     original_exception = e
@@ -5811,6 +5888,9 @@ class Router:
             - there are no fallbacks
             - there are no healthy deployments in the same model group
         """
+        # Trusted refusal cannot be overridden by deployment count or retry policy.
+        if refusal_code(error):
+            raise error
         _num_healthy_deployments = 0
         if healthy_deployments is not None and isinstance(healthy_deployments, list):
             _num_healthy_deployments = len(healthy_deployments)
@@ -6337,6 +6417,9 @@ class Router:
 
         Else, original response is returned.
         """
+        # Return the original usage/reason; a successful refusal is already terminal.
+        if is_refusal_response(response):
+            return False
         if response.choices and len(response.choices) > 0:
             if response.choices[0].finish_reason != "content_filter":
                 return False

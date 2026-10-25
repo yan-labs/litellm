@@ -1,4 +1,5 @@
 from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 import httpx
 
@@ -20,6 +21,7 @@ from litellm.types.router import GenericLiteLLMParams
 from ...common_utils import (
     AnthropicError,
     AnthropicModelInfo,
+    optionally_add_kie_bearer_header,
     optionally_handle_anthropic_oauth,
 )
 
@@ -152,6 +154,9 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
             auth_header = AnthropicModelInfo.get_auth_header(api_key)
             if auth_header is not None:
                 headers.update(auth_header)
+        optionally_add_kie_bearer_header(
+            headers, AnthropicModelInfo.get_api_base(api_base)
+        )
         if "anthropic-version" not in headers:
             headers["anthropic-version"] = DEFAULT_ANTHROPIC_API_VERSION
         if "content-type" not in headers:
@@ -163,6 +168,36 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
         )
 
         return headers, api_base
+
+    @staticmethod
+    def _translate_legacy_thinking_for_adaptive_model(
+        model: str, optional_params: Dict
+    ) -> None:
+        """Translate legacy ``thinking.type=enabled`` to adaptive for 4.6/4.7.
+        Caller-provided ``output_config.effort`` is never overridden.
+        """
+        if not AnthropicModelInfo._is_adaptive_thinking_model(model):
+            return
+        thinking = optional_params.get("thinking")
+        if not isinstance(thinking, dict) or thinking.get("type") != "enabled":
+            return
+
+        budget = int(thinking.get("budget_tokens") or 0)
+        if budget >= 24000:
+            effort = "xhigh"
+        elif budget >= 10000:
+            effort = "high"
+        elif budget >= 5000:
+            effort = "medium"
+        else:
+            effort = "low"
+
+        optional_params["thinking"] = {"type": "adaptive"}
+        existing_output_config = optional_params.get("output_config")
+        if not isinstance(existing_output_config, dict):
+            existing_output_config = {}
+        existing_output_config.setdefault("effort", effort)
+        optional_params["output_config"] = existing_output_config
 
     def transform_anthropic_messages_request(
         self,
@@ -184,6 +219,11 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
                 message="max_tokens is required for Anthropic /v1/messages API",
                 status_code=400,
             )
+
+        self._translate_legacy_thinking_for_adaptive_model(
+            model=model,
+            optional_params=anthropic_messages_optional_request_params,
+        )
 
         # Filter out x-anthropic-billing-header from system messages
         system_param = anthropic_messages_optional_request_params.get("system")
@@ -211,6 +251,13 @@ class AnthropicMessagesConfig(BaseAnthropicMessagesConfig):
                 anthropic_messages_optional_request_params[
                     "context_management"
                 ] = transformed_context_management
+
+        if urlparse(litellm_params.get("api_base") or "").hostname == "api.wokey.ai":
+            # output_config belongs to the request, not replayed message envelopes.
+            messages = [
+                {key: value for key, value in message.items() if key != "output_config"}
+                for message in messages
+            ]
 
         ####### get required params for all anthropic messages requests ######
         verbose_logger.debug(f"TRANSFORMATION DEBUG - Messages: {messages}")

@@ -1581,3 +1581,18 @@ def test_non_bash_tool_result_skipped():
     assert (
         len(code_results) == 0
     ), f"Expected 0 code_interpreter_results for text_editor result, got {len(code_results)}"
+
+
+def test_convert_str_chunk_done_sentinel():
+    from litellm.types.utils import ModelResponseStream
+
+    iterator = ModelResponseIterator(None, sync_stream=True)
+    for chunk in ("data: [DONE]", "event: message_stop\ndata: [DONE]"):
+        assert isinstance(
+            iterator.convert_str_chunk_to_generic_chunk(chunk), ModelResponseStream
+        )
+
+    complete_chunk = '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}'
+    result = iterator.convert_str_chunk_to_generic_chunk(f"data: {complete_chunk}")
+    assert isinstance(result, ModelResponseStream)
+    assert result.choices[0].delta.content == "Hello"

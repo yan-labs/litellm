@@ -552,6 +552,40 @@ describe("ModelInfoView", () => {
     expect(updatePayload.litellm_params.litellm_credential_name).not.toBe("from-json");
   });
 
+  it("should omit empty vector store ids when saving model settings", async () => {
+    const user = userEvent.setup();
+    const modelWithEmptyVectorStores = {
+      ...defaultModelData,
+      litellm_params: {
+        ...defaultModelData.litellm_params,
+        vector_store_ids: [],
+      },
+    };
+    mockUseModelsInfo.mockReturnValue({
+      data: {
+        data: [modelWithEmptyVectorStores],
+      },
+      isLoading: false,
+      error: null,
+    });
+
+    render(<ModelInfoView {...DEFAULT_ADMIN_PROPS} />, { wrapper });
+
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: /edit settings/i })).toBeInTheDocument();
+    });
+
+    await user.click(screen.getByRole("button", { name: /edit settings/i }));
+    await user.click(screen.getByRole("button", { name: /save changes/i }));
+
+    await waitFor(() => {
+      expect(mockModelPatchUpdateCall).toHaveBeenCalled();
+    });
+
+    const updatePayload = mockModelPatchUpdateCall.mock.calls[0][1];
+    expect(updatePayload.litellm_params).not.toHaveProperty("vector_store_ids");
+  });
+
   it("should display health check model field for wildcard models", async () => {
     const wildcardModelData = {
       ...defaultModelData,

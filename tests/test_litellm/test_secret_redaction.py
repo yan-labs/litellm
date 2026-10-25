@@ -1,5 +1,6 @@
 import logging
 import sys
+import time
 from io import StringIO
 from unittest.mock import patch
 
@@ -262,3 +263,51 @@ def test_key_name_redaction_in_general_settings_dict():
     assert "REDACTED" in output
     # Non-sensitive values should survive
     assert "enable_jwt_auth" in output
+
+
+# ---------------------------------------------------------------------------
+# Regression tests: the redaction regex runs synchronously on the event loop
+# (logging filter + failure handlers), so any super-linear pattern lets one
+# large log/exception string freeze the whole proxy. See KollabTeam/kollab-workspace#770.
+# ---------------------------------------------------------------------------
+
+
+def test_redaction_is_linear_on_long_word_runs():
+    """A long run of word characters must not trigger O(n^2) backtracking.
+
+    The key-name pattern starts with `\\w*`; without an anchor the engine retried it
+    from every offset of a word run (20k chars took ~6s, 500k chars ~1h).
+    """
+    start = time.perf_counter()
+    _redact_string("a" * 20000)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"word-run redaction took {elapsed:.1f}s (quadratic backtracking)"
+
+
+def test_redaction_is_linear_on_url_heavy_text_without_whitespace():
+    """Many `scheme://` tokens in one whitespace/quote-free run must stay linear.
+
+    The connection-string pattern used `[^\\s'\"]*:[^\\s'\"@]+(?=@)` after every `://`,
+    which is O(n^3) when a URL list is joined by escaped newlines (300 URLs took
+    several seconds, a few thousand never finished).
+    """
+    payload = "".join("https://example.com/path/%d:x\\n" % i for i in range(300))
+    start = time.perf_counter()
+    _redact_string(payload)
+    elapsed = time.perf_counter() - start
+    assert elapsed < 2.0, f"URL-run redaction took {elapsed:.1f}s (cubic backtracking)"
+
+
+def test_linear_patterns_still_redact_credentials():
+    """The anchored/narrowed patterns must keep redacting what they were written for."""
+    cases = [
+        ("x_db_password=hunter22222", "hunter22222"),
+        ("{'client_secret': 'abcdefgh12345'}", "abcdefgh12345"),
+        ("connecting to postgresql://admin:s3cretpass@db.example.com:5432/mydb", "s3cretpass"),
+        ("redis://:secretpw@cache:6379", "secretpw"),
+        ("mysql://root:hunter2@10.0.0.1:3306/x", "hunter2"),
+    ]
+    for text, secret in cases:
+        result = _redact_string(text)
+        assert secret not in result, f"{text!r} was not redacted: {result!r}"
+        assert "REDACTED" in result

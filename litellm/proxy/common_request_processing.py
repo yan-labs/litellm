@@ -1,3 +1,15 @@
+"""Gateway request/response orchestration shared by managed model API entries.
+
+Trusted terminal errors retain their code and real usage in stream envelopes.
+"""
+"""Shared LiteLLM proxy request processing.
+
+Kollab's Tokyo deployment instruments this layer because every proxied
+Anthropic Messages request passes through it before routing to a provider.
+The latency markers here separate proxy setup and hook scheduling from the
+provider HTTP wait without copying request content into logs.
+"""
+
 import asyncio
 import json
 import logging
@@ -21,7 +33,7 @@ from fastapi import HTTPException, Request, status
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import litellm
-from litellm._logging import verbose_proxy_logger
+from litellm._logging import _redact_string, verbose_proxy_logger
 from litellm._uuid import uuid
 from litellm.constants import (
     DD_TRACER_STREAMING_CHUNK_YIELD_RESOURCE,
@@ -44,6 +56,11 @@ from litellm.proxy.common_utils.callback_utils import (
     get_remaining_tokens_and_requests_from_request_data,
 )
 from litellm.proxy.dd_span_tagger import DDSpanTagger
+from litellm.proxy.kollab_latency_debug import (
+    attach_trace_context,
+    latency_now,
+    log_latency_stage,
+)
 from litellm.proxy.route_llm_request import route_request
 from litellm.proxy.utils import ProxyLogging
 from litellm.router import Router
@@ -751,6 +768,13 @@ class ProxyBaseLLMRequestProcessing:
             user_api_key_dict=user_api_key_dict, data=self.data, call_type=route_type  # type: ignore
         )
 
+        # Hooks may return a copied request dict. A deep copy also clones the
+        # internal Logging object, which would let Router enrich one instance
+        # while streaming success callbacks bill with another. Restore the
+        # canonical object created above after hook mutations so routing,
+        # streaming, headers, and spend tracking share one request identity.
+        self.data["litellm_logging_obj"] = logging_obj
+
         # Apply hierarchical router_settings (Key > Team)
         # Global router_settings are already on the Router object itself.
         if llm_router is not None and proxy_config is not None:
@@ -907,8 +931,17 @@ class ProxyBaseLLMRequestProcessing:
         """
         Common request processing logic for both chat completions and responses API endpoints
         """
+        base_started_at = latency_now()
         requested_model_from_client: Optional[str] = (
             self.data.get("model") if isinstance(self.data.get("model"), str) else None
+        )
+        log_latency_stage(
+            "base_process_start",
+            started_at=base_started_at,
+            total_started_at=base_started_at,
+            data=self.data,
+            request=request,
+            route_type=route_type,
         )
         self._debug_log_request_payload()
 
@@ -920,6 +953,7 @@ class ProxyBaseLLMRequestProcessing:
                     "Ensure common_processing_pre_call_logic was called before using this parameter."
                 )
         else:
+            pre_call_started_at = latency_now()
             self.data, logging_obj = await self.common_processing_pre_call_logic(
                 request=request,
                 general_settings=general_settings,
@@ -935,6 +969,28 @@ class ProxyBaseLLMRequestProcessing:
                 model=model,
                 route_type=route_type,
                 llm_router=llm_router,
+            )
+            trace_context = attach_trace_context(
+                logging_obj,
+                data=self.data,
+                request=request,
+                route_type=route_type,
+            )
+            trace_context["started_at"] = base_started_at
+            log_latency_stage(
+                "common_pre_call_complete",
+                started_at=pre_call_started_at,
+                total_started_at=base_started_at,
+                data=self.data,
+                request=request,
+                logging_obj=logging_obj,
+                route_type=route_type,
+                details={
+                    "has_router": llm_router is not None,
+                    "has_guardrails": _post_call_guardrails_active
+                    if "_post_call_guardrails_active" in locals()
+                    else False,
+                },
             )
 
         # Defer async logging when post-call guardrails are configured so the
@@ -960,6 +1016,7 @@ class ProxyBaseLLMRequestProcessing:
         tasks = []
         # Start the moderation check (during_call_hook) as early as possible
         # This gives it a head start to mask/validate input while the proxy handles routing
+        during_hook_started_at = latency_now()
         tasks.append(
             asyncio.create_task(
                 proxy_logging_obj.during_call_hook(
@@ -969,6 +1026,15 @@ class ProxyBaseLLMRequestProcessing:
                 )
             )
         )
+        log_latency_stage(
+            "during_call_hook_scheduled",
+            started_at=during_hook_started_at,
+            total_started_at=base_started_at,
+            data=self.data,
+            request=request,
+            logging_obj=logging_obj,
+            route_type=route_type,
+        )
 
         # Pass contents if provided
         if contents:
@@ -976,11 +1042,22 @@ class ProxyBaseLLMRequestProcessing:
 
         ### ROUTE THE REQUEST ###
         # Do not change this - it should be a constant time fetch - ALWAYS
+        route_started_at = latency_now()
         llm_call = await route_request(
             data=self.data,
             route_type=route_type,
             llm_router=llm_router,
             user_model=user_model,
+        )
+        log_latency_stage(
+            "route_request_returned",
+            started_at=route_started_at,
+            total_started_at=base_started_at,
+            data=self.data,
+            request=request,
+            logging_obj=logging_obj,
+            route_type=route_type,
+            details={"llm_call_type": type(llm_call).__name__},
         )
         tasks.append(llm_call)
 
@@ -989,9 +1066,23 @@ class ProxyBaseLLMRequestProcessing:
             *tasks
         )  # run the moderation check in parallel to the actual llm api call
 
+        llm_wait_started_at = latency_now()
         responses = await llm_responses
 
         response = responses[1]
+        log_latency_stage(
+            "llm_response_ready",
+            started_at=llm_wait_started_at,
+            total_started_at=base_started_at,
+            data=self.data,
+            request=request,
+            logging_obj=logging_obj,
+            route_type=route_type,
+            details={
+                "response_type": type(response).__name__,
+                "streaming_response": self._is_streaming_response(response),
+            },
+        )
 
         _exception_raised = False
         try:
@@ -1128,6 +1219,15 @@ class ProxyBaseLLMRequestProcessing:
                                 request_data=self.data,
                                 proxy_logging_obj=proxy_logging_obj,
                             )
+                        )
+                        log_latency_stage(
+                            "stream_response_wrapped",
+                            total_started_at=base_started_at,
+                            data=self.data,
+                            request=request,
+                            logging_obj=logging_obj,
+                            route_type=route_type,
+                            details={"media_type": "text/event-stream"},
                         )
                         return await create_response(
                             generator=selected_data_generator,
@@ -1703,10 +1803,12 @@ class ProxyBaseLLMRequestProcessing:
 
             if isinstance(e, HTTPException):
                 raise e
-            error_traceback = traceback.format_exc()
+            error_traceback = _redact_string(traceback.format_exc())
             error_msg = f"{str(e)}\n\n{error_traceback}"
             proxy_exception = ProxyException(
                 message=getattr(e, "message", error_msg),
+                provider_specific_fields=getattr(e, "provider_specific_fields", None),
+                openai_code=getattr(e, "code", None),
                 type=getattr(e, "type", "None"),
                 param=getattr(e, "param", "None"),
                 code=getattr(e, "status_code", 500),

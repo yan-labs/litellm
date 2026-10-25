@@ -60,6 +60,16 @@ def test_minimax_provider_config_manager():
     assert config.custom_llm_provider == "minimax"
 
 
+def test_minimax_messages_does_not_support_structured_output_params():
+    """MiniMax Anthropic-compatible API should not advertise structured outputs."""
+    config = MinimaxMessagesConfig()
+
+    supported_params = config.get_supported_anthropic_messages_params("MiniMax-M2.7")
+
+    assert "output_config" not in supported_params
+    assert "output_format" not in supported_params
+
+
 @pytest.mark.skip(reason="Requires actual MiniMax API key")
 def test_minimax_completion_basic():
     """Test basic completion with MiniMax Anthropic-compatible API"""
@@ -144,4 +154,3 @@ if __name__ == "__main__":
     print("✓ Provider config manager test passed")
     
     print("\n✅ All basic tests passed!")
-

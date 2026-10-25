@@ -612,6 +612,166 @@ def _count_image_tokens(
         )
 
 
+def _count_anthropic_image(
+    content: Mapping[str, Any],
+    use_default_image_token_count: bool,
+) -> int:
+    """
+    Count tokens for an Anthropic-native image content block.
+
+    Anthropic shape: {"type": "image", "source": {...}}
+    """
+    source = content.get("source")
+    if not isinstance(source, dict):
+        raise ValueError("Anthropic image block missing required 'source' dict")
+
+    source_type = source.get("type")
+    if source_type == "base64":
+        media_type = source.get("media_type", "")
+        data = source.get("data", "")
+        data_url = f"data:{media_type};base64,{data}"
+        return calculate_img_tokens(
+            data=data_url,
+            mode="auto",
+            use_default_image_token_count=use_default_image_token_count,
+        )
+    if source_type == "url":
+        url = source.get("url")
+        if not url:
+            raise ValueError(
+                "Anthropic image block with source.type='url' missing 'url'"
+            )
+        return calculate_img_tokens(
+            data=url,
+            mode="auto",
+            use_default_image_token_count=use_default_image_token_count,
+        )
+
+    return DEFAULT_IMAGE_TOKEN_COUNT
+
+
+def _count_anthropic_document(
+    content: Mapping[str, Any],
+    count_function: TokenCounterFunction,
+) -> int:
+    """
+    Count tokens for an Anthropic-native document content block.
+    """
+    tokens = 0
+    for field in ("title", "context"):
+        value = content.get(field)
+        if isinstance(value, str) and value:
+            tokens += count_function(value)
+
+    source = content.get("source")
+    if isinstance(source, dict) and source.get("type") == "text":
+        data = source.get("data")
+        if isinstance(data, str) and data:
+            tokens += count_function(data)
+    elif source is not None:
+        tokens += DEFAULT_IMAGE_TOKEN_COUNT
+
+    return tokens
+
+
+_GENERIC_CONTENT_TEXT_KEYS = {
+    "text",
+    "content",
+    "input",
+    "query",
+    "name",
+    "title",
+    "context",
+    "thinking",
+}
+_GENERIC_CONTENT_METADATA_KEYS = {
+    "type",
+    "id",
+    "tool_use_id",
+    "cache_control",
+    "is_error",
+    "signature",
+    "citations",
+    "source",
+    "data",
+    "bytes",
+    "url",
+    "file_id",
+    "media_type",
+}
+_GENERIC_OPAQUE_MEDIA_TYPES = {
+    "image",
+    "document",
+    "video",
+    "audio",
+    "file",
+    "input_image",
+    "input_audio",
+    "input_file",
+    "image_url",
+    "document_url",
+    "audio_url",
+    "video_url",
+}
+
+
+def _count_generic_content_value(
+    count_function: TokenCounterFunction,
+    value: Any,
+    use_default_image_token_count: bool,
+    default_token_count: Optional[int],
+) -> int:
+    if isinstance(value, str):
+        return count_function(value)
+    if isinstance(value, list):
+        return _count_content_list(
+            count_function,
+            cast(OpenAIMessageContent, value),
+            use_default_image_token_count,
+            default_token_count,
+        )
+    if isinstance(value, Mapping):
+        return _count_generic_content_block(
+            count_function,
+            value,
+            use_default_image_token_count,
+            default_token_count,
+        )
+    return 0
+
+
+def _count_generic_content_block(
+    count_function: TokenCounterFunction,
+    content: Mapping[str, Any],
+    use_default_image_token_count: bool,
+    default_token_count: Optional[int],
+) -> int:
+    """
+    Best-effort counter for provider-native or future content blocks.
+
+    Known block types still use explicit branches above. This fallback prevents a
+    newly added provider block from turning token counting into a 500 while
+    avoiding obviously opaque payload fields like base64 data or file ids.
+    """
+    tokens = 0
+    for key, value in content.items():
+        if key in _GENERIC_CONTENT_METADATA_KEYS:
+            continue
+        if key in _GENERIC_CONTENT_TEXT_KEYS:
+            tokens += _count_generic_content_value(
+                count_function,
+                value,
+                use_default_image_token_count,
+                default_token_count,
+            )
+
+    content_type = str(content.get("type", "")).lower()
+    if content_type in _GENERIC_OPAQUE_MEDIA_TYPES and tokens == 0:
+        return DEFAULT_IMAGE_TOKEN_COUNT
+
+    return tokens
+
+
 def _validate_anthropic_content(content: Mapping[str, Any]) -> type:
     """
     Validate and determine which Anthropic TypedDict applies.
@@ -705,35 +865,38 @@ def _count_content_list(
         for c in content_list:
             if isinstance(c, str):
                 num_tokens += count_function(c)
-            elif c["type"] == "text":
+            elif not isinstance(c, Mapping):
+                continue
+            elif c.get("type") == "text":
                 num_tokens += count_function(str(c.get("text", "")))
-            elif c["type"] == "image_url":
+            elif c.get("type") == "image_url":
                 image_url = c.get("image_url")
                 num_tokens += _count_image_tokens(
                     image_url, use_default_image_token_count
                 )
-            elif c["type"] in ("tool_use", "tool_result"):
+            elif c.get("type") in ("tool_use", "tool_result"):
                 num_tokens += _count_anthropic_content(
                     c,
                     count_function,
                     use_default_image_token_count,
                     default_token_count,
                 )
-            elif c["type"] == "thinking":
+            elif c.get("type") == "thinking":
                 # Claude extended thinking content block
                 # Count the thinking text and skip signature (opaque signature blob)
                 thinking_text = str(c.get("thinking", ""))
                 if thinking_text:
                     num_tokens += count_function(thinking_text)
+            elif c.get("type") == "image":
+                num_tokens += _count_anthropic_image(c, use_default_image_token_count)
+            elif c.get("type") == "document":
+                num_tokens += _count_anthropic_document(c, count_function)
             else:
-                content_type = (
-                    c.get("type", type(c).__name__)
-                    if isinstance(c, dict)
-                    else type(c).__name__
-                )
-                raise ValueError(
-                    f"Invalid content item type: {content_type}. "
-                    f"Expected str or dict with 'type' field (text, image_url, tool_use, tool_result, thinking)."
+                num_tokens += _count_generic_content_block(
+                    count_function,
+                    c,
+                    use_default_image_token_count,
+                    default_token_count,
                 )
         return num_tokens
     except Exception as e:

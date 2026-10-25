@@ -1,0 +1,829 @@
+# Deploy LiteLLM Tokyo
+#
+# 这个 workflow 负责把仓库里的 LiteLLM 配置 / 代码同步到 Tokyo EC2 并重启容器。
+# 它位于 Tokyo LiteLLM 部署链路的发布层，是 docs/litellm_tokyo_deployment.md 里
+# 「部署 / 更新最小步骤」的自动化版本。
+#
+# 两种 action_mode：
+#   - sync-and-restart：仅 config 改动，docker restart 现有容器（秒级）
+#   - build-and-restart：代码改动，重建 image + 替换容器（分钟级；含 health + rollback）
+#   - restart / health-check：辅助
+#
+# 自动触发 (push) 时，根据 git diff 自动选 sync / build 模式：
+#   只动 config       → sync-and-restart
+#   含 litellm/** 等  → build-and-restart
+#
+# 为什么走 SSM 而不是 SSH：
+# LiteLLM EC2 安全组只开放 443/4000（部署文档第 239-243 行），没有 22 端口，
+# 不能 SSH ProxyJump。AWS SSM 通过 SSM Agent 的出站连接工作，
+# 不依赖 EC2 入站端口，和部署文档里手动示例（aws ssm send-command）完全一致。
+#
+# 需要的 secrets / vars（全部放在 KollabTeam/litellm repo 级别，org 无依赖）：
+#   Secrets:
+#     - AWS_ACCESS_KEY_ID                  专用 IAM user litellm-gha-tokyo 的 access key
+#     - AWS_SECRET_ACCESS_KEY              对应 secret
+#     该 IAM user 仅对 TEST H3b i-02f26d65ba650db94 / PROD H1 i-07da62c91771f115c 调用 ssm:SendCommand
+#   Variables:
+#     - AWS_REGION                         ap-northeast-1
+#     - TOKYO_LITELLM_EC2_ID               TEST H3b i-02f26d65ba650db94
+#     - TOKYO_LITELLM_PROD_EC2_ID          PROD H1 i-07da62c91771f115c（缺省值）
+#   仓库里的真相源：
+#     - config/litellm.test.yaml / config/litellm.prod.yaml      （配置）
+#     - scripts/reconcile_managed_model_routes.py                 （受控路由收敛）
+#     - scripts/reconcile_gateway_key_models.py                   （网关 key 权限收敛）
+#     - scripts/classify_deploy_action_mode.sh                     （自动部署模式判定）
+#     - litellm/**                                                  （代码）
+#     - deploy/Dockerfile.overlay                                   （build context）
+
+name: Deploy LiteLLM Tokyo
+
+on:
+  # test 自动部署：push 到发布分支，且相关文件有变动时触发。
+  # prod 不放进这里，避免 prod 配置 / 代码改动顺手被推上去。
+  push:
+    branches:
+      - openrouter-fix-20260326
+    paths:
+      - 'config/litellm.test.yaml'
+      - 'scripts/reconcile_managed_model_routes.py'
+      - 'scripts/reconcile_gateway_key_models.py'
+      - 'scripts/test_reconcile_gateway_key_models.py'
+      - 'scripts/classify_deploy_action_mode.sh'
+      - 'scripts/test_classify_deploy_action_mode.py'
+      - 'scripts/*multimedia*.py'
+      - 'litellm/**'
+      - 'pyproject.toml'
+      - 'requirements*.txt'
+      - 'deploy/Dockerfile.overlay'
+      - '.github/workflows/deploy-tokyo.yml'
+  # prod 永远只通过人工 Run workflow 触发；test 也支持手动（调试 / 复跑）。
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: '目标环境'
+        required: true
+        type: choice
+        options:
+          - test
+          - prod
+        default: test
+      action_mode:
+        description: '在 EC2 上执行的动作'
+        required: true
+        type: choice
+        options:
+          - auto                # push 触发时的等价路径：按 changed files 判定
+          - sync-and-restart    # 仅同步 config 再 restart
+          - sync-multimedia-only # 只补已批准托管 alias（含 Omni），不运行任何路由/权限收敛
+          - build-and-restart   # 重建 image + 替换容器（含 rollback）
+          - restart             # 仅 restart
+          - health-check        # 只跑健康检查
+        default: auto
+      skip_reconciliation:
+        description: '跳过通用路由探测和权限收敛，仅构建、重启与 readiness（专项配置发布）'
+        required: false
+        type: boolean
+        default: false
+      expected_sha:
+        description: '可选：把手动发布固定到完整 commit SHA；必须与本次 workflow 事件的提交一致'
+        required: false
+        type: string
+
+concurrency:
+  # test / prod 各自串行，避免同一环境两次 restart 打架；
+  # 不同环境之间互不阻塞。push 触发时 inputs.environment 为空，回退到 test。
+  group: deploy-litellm-tokyo-${{ inputs.environment || 'test' }}
+  cancel-in-progress: false
+
+jobs:
+  # 守门：Tokyo 私有部署只允许从 openrouter-fix-20260326 发起，
+  # 对齐 docs/litellm_tokyo_deployment.md 的发布约定。
+  guard-branch:
+    runs-on: [self-hosted, litellm-tokyo]
+    outputs:
+      skip_deploy: ${{ steps.scope.outputs.skip_deploy }}
+    steps:
+      - name: 只允许 openrouter-fix-20260326 触发
+        run: |
+          if [ "${GITHUB_REF}" != "refs/heads/openrouter-fix-20260326" ]; then
+            echo "Tokyo deploy 必须从 openrouter-fix-20260326 触发，当前是 ${GITHUB_REF}" >&2
+            exit 1
+          fi
+      - name: 校验手动发布固定 SHA
+        if: github.event_name == 'workflow_dispatch' && inputs.expected_sha != ''
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          set -euo pipefail
+          if ! [[ "$EXPECTED_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "expected_sha 必须是完整的 40 位 commit SHA" >&2
+            exit 1
+          fi
+          if [ "$EXPECTED_SHA" != "$GITHUB_SHA" ]; then
+            echo "workflow 事件提交与 expected_sha 不一致" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # 发布控制本身被 push paths 命中；这类独立改动必须先安全停在这里，
+      # 由显式受限 dispatch 发布，不能先运行旧 reconciler 再取消。
+      - name: 隔离受限发布控制的自动 push
+        id: scope
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: python3 scripts/classify_multimedia_push.py >> "$GITHUB_OUTPUT"
+
+  deploy:
+    needs: guard-branch
+    if: needs.guard-branch.outputs.skip_deploy != 'true'
+    runs-on: [self-hosted, litellm-tokyo]
+    timeout-minutes: 30
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      INSTANCE_ID: ${{ inputs.environment == 'prod' && (vars.TOKYO_LITELLM_PROD_EC2_ID || 'i-07da62c91771f115c') || (vars.TOKYO_LITELLM_EC2_ID || 'i-02f26d65ba650db94') }}
+      # push 触发时无 inputs：环境统一落到 test，模式默认 auto（按 changed files 判定）。
+      # prod 必须人工 workflow_dispatch + 选 prod。
+      ENV_NAME: ${{ inputs.environment || 'test' }}
+      RAW_ACTION_MODE: ${{ inputs.action_mode || 'auto' }}
+      EXPECTED_SHA: ${{ inputs.expected_sha }}
+      SKIP_RECONCILIATION: ${{ inputs.skip_reconciliation || 'false' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # push 可能一次包含多个 commit；完整历史保证 event.before 可用于 diff。
+          fetch-depth: 0
+
+      # 仅受限模式强制完整 SHA；必须早于 AWS 身份和任何 SSM 请求。
+      - name: 校验受限发布固定 SHA
+        if: env.RAW_ACTION_MODE == 'sync-multimedia-only'
+        run: python3 scripts/dispatch_multimedia_config.py --environment "$ENV_NAME" --expected-sha "$EXPECTED_SHA" --verify-only
+
+      - name: 测试部署模式分类
+        run: python3 scripts/test_classify_deploy_action_mode.py
+
+      - name: 测试受限多媒体配置发布
+        run: |
+          python3 -m venv "$RUNNER_TEMP/multimedia-tests-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          TEST_PYTHON="$RUNNER_TEMP/multimedia-tests-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/bin/python"
+          "$TEST_PYTHON" -m pip install --disable-pip-version-check 'PyYAML==6.0.3' 'httpx==0.28.1'
+          "$TEST_PYTHON" -m unittest scripts/test_multimedia_config_release.py
+
+      # auto 模式：根据 push 改动的文件自动选 sync 还是 build。
+      # 这一步是新增的：解决「日常改 config 走快路径，改代码自动走慢路径」。
+      - name: 解析最终 action_mode
+        id: mode
+        run: |
+          set -euo pipefail
+          MODE="$RAW_ACTION_MODE"
+          if [ "$MODE" = "auto" ]; then
+            # GITHUB_EVENT_BEFORE 在 push 事件下指向上一次 commit；
+            # workflow_dispatch + auto 时为 0...0，用 HEAD~1 兜底。
+            BEFORE_SHA="${{ github.event.before }}"
+            if [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ]; then
+              BEFORE_REF="HEAD~1"
+            else
+              BEFORE_REF="$BEFORE_SHA"
+            fi
+            # 分类脚本在 diff 基准不可用时强制完整构建，避免代码变更被静默
+            # 当成配置快路径；它只把最终模式写到 stdout，变更清单写到日志。
+            MODE=$(scripts/classify_deploy_action_mode.sh "$BEFORE_REF" HEAD)
+          fi
+          echo "Final action_mode: $MODE"
+          echo "action_mode=$MODE" >> "$GITHUB_OUTPUT"
+
+      # 把 test / prod 的差异集中在这里映射一次，下游所有 step 都读 outputs，
+      # 避免后面每一步都写一遍 if env == prod 的分支。
+      - name: 解析环境参数
+        id: target
+        run: |
+          if [ "${ENV_NAME}" = "prod" ]; then
+            echo "container=litellm"                    >> "$GITHUB_OUTPUT"
+            echo "remote_dir=/opt/litellm"              >> "$GITHUB_OUTPUT"
+            echo "local_port=4000"                      >> "$GITHUB_OUTPUT"
+            echo "config_src=config/litellm.prod.yaml"  >> "$GITHUB_OUTPUT"
+            echo "image_repo=litellm-openrouter-fix"    >> "$GITHUB_OUTPUT"
+            echo "overlay_dir=/opt/litellm-overlay-build" >> "$GITHUB_OUTPUT"
+          elif [ "${ENV_NAME}" = "test" ]; then
+            echo "container=litellm-test"               >> "$GITHUB_OUTPUT"
+            echo "remote_dir=/opt/litellm-test"         >> "$GITHUB_OUTPUT"
+            echo "local_port=4001"                      >> "$GITHUB_OUTPUT"
+            echo "config_src=config/litellm.test.yaml"  >> "$GITHUB_OUTPUT"
+            echo "image_repo=litellm-openrouter-fix-test" >> "$GITHUB_OUTPUT"
+            echo "overlay_dir=/opt/litellm-test-overlay-build" >> "$GITHUB_OUTPUT"
+          else
+            echo "未知环境: ${ENV_NAME}" >&2
+            exit 1
+          fi
+
+      # 路由收敛会删除数据库 deployment；任何脚本变更必须先通过纯本地单测，
+      # 不能把 TEST 环境当成语法或 allowlist 的第一道验证。
+      - name: 测试受控路由收敛
+        run: |
+          TEST_PYTHON="$RUNNER_TEMP/multimedia-tests-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}/bin/python"
+          "$TEST_PYTHON" -m unittest scripts/test_reconcile_managed_model_routes.py
+          "$TEST_PYTHON" -m unittest scripts/test_reconcile_gateway_key_models.py
+          "$TEST_PYTHON" -m unittest scripts/test_reconcile_aliyun_v41_route.py
+          "$TEST_PYTHON" -m unittest scripts/test_openrouter_audio_gateway.py
+
+      - name: 配置 AWS 凭证
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: 校验 SSM 连通性
+        run: |
+          STATUS=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+            --query "InstanceInformationList[0].PingStatus" --output text)
+          if [ "$STATUS" != "Online" ]; then
+            echo "EC2 ${INSTANCE_ID} SSM 状态=${STATUS}，不可达" >&2
+            exit 1
+          fi
+          echo "SSM 连通：${INSTANCE_ID} 状态 ${STATUS}"
+
+      # ===========================================================================
+      # 路径 A：sync-and-restart —— 配置-only 快路径，秒级
+      # ===========================================================================
+      # 只有 sync-and-restart 才把仓库 config 推到 EC2。
+      # 为什么 base64：config 里有冒号、多行等 shell 特殊字符，
+      # 直接塞进 send-command 的 commands 数组会触发 JSON / shell 双重转义地狱。
+      # base64 -> 远端 decode，是 SSM 跑多行文本最稳的姿势。
+      # 该分支自带当前配置差异校验、备份、readiness 和回滚；没有 DB/key
+      # 收敛，也不进入会读取环境密钥到 shell 的通用健康检查。
+      - name: SSM 受限多媒体配置发布
+        if: steps.mode.outputs.action_mode == 'sync-multimedia-only'
+        run: python3 scripts/dispatch_multimedia_config.py --environment "$ENV_NAME" --expected-sha "$EXPECTED_SHA"
+
+      - name: SSM 同步 config + 重启
+        if: steps.mode.outputs.action_mode == 'sync-and-restart'
+        run: |
+          set -euo pipefail
+          SRC="${{ steps.target.outputs.config_src }}"
+          if [ ! -f "$SRC" ]; then
+            echo "仓库里找不到配置源文件 $SRC" >&2
+            exit 1
+          fi
+          B64=$(base64 < "$SRC" | tr -d '\n')
+          REMOTE_DIR='${{ steps.target.outputs.remote_dir }}'
+          CONTAINER='${{ steps.target.outputs.container }}'
+
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm deploy ${ENV_NAME} by GHA ${GITHUB_RUN_ID}" \
+            --parameters "commands=[
+              \"set -euo pipefail\",
+              \"TS=\$(date +%Y%m%d-%H%M%S)\",
+              \"sudo cp '${REMOTE_DIR}/config.yaml' '${REMOTE_DIR}/config.yaml.bak.'\\\"\$TS\\\"\",
+              \"echo '${B64}' | base64 -d | sudo tee '${REMOTE_DIR}/config.yaml' >/dev/null\",
+              \"sudo chown root:root '${REMOTE_DIR}/config.yaml'\",
+              \"sudo chmod 644 '${REMOTE_DIR}/config.yaml'\",
+              \"sudo docker restart '${CONTAINER}'\",
+              \"echo '备份: ${REMOTE_DIR}/config.yaml.bak.'\\\"\$TS\\\"\"
+            ]" \
+            --query "Command.CommandId" --output text)
+          echo "command_id=$CID"
+          echo "CID=$CID" >> "$GITHUB_ENV"
+
+      # ===========================================================================
+      # 路径 B：build-and-restart —— 代码改动慢路径
+      # ===========================================================================
+      # 步骤逻辑：
+      #   1) tar litellm/ + pyproject + Dockerfile.overlay → S3（runner 上传）
+      #   2) EC2 走 SSM aws s3 cp 拉 tar，解压 + docker build 新 tag
+      #   3) docker inspect 抓现 container 的 env / port / volume，rename 为 bak
+      #   4) docker run 新 image，复用 bak 的 env / port / volume
+      #   5) health check 失败 → rename bak 回来 + start
+      #
+      # 为什么走 S3 中转：
+      # 14MB tar 走 SSM chunk 上传需要 1000+ round-trip（25min），不可用。
+      # S3 几秒就到，runner 用 IAM user (LitellmBuildBucketWrite) 写，
+      # EC2 用 instance role (litellm-build-bucket-read) 读。
+      # bucket: kollab-litellm-build-20260415174047-13269 (artifacts/ prefix)
+      #
+      # 为什么 build 也走 SSM 而不是 runner 直接 docker build：
+      # self-hosted runner 不一定有 docker.sock 权限；走 SSM + sudo 的路径
+      # 跟手动 runbook 完全一致，权限模型简单可审计。
+
+      - name: 打包代码 → S3
+        if: steps.mode.outputs.action_mode == 'build-and-restart'
+        id: upload
+        env:
+          BUILD_BUCKET: kollab-litellm-build-20260415174047-13269
+          CONFIG_SRC: ${{ steps.target.outputs.config_src }}
+        run: |
+          set -euo pipefail
+          # 完整构建也必须携带目标环境配置。代码和配置经常同一批发布；
+          # 若这里只换镜像不换 config，容器会以新路由代码读取旧模型表。
+          tar -czf /tmp/litellm-overlay.tar.gz \
+            litellm \
+            pyproject.toml \
+            $( [ -f requirements.txt ] && echo requirements.txt ) \
+            deploy/Dockerfile.overlay \
+            "$CONFIG_SRC"
+          ls -lh /tmp/litellm-overlay.tar.gz
+          MD5=$(md5sum /tmp/litellm-overlay.tar.gz | awk '{print $1}')
+          echo "tar md5: $MD5"
+
+          # 走 S3：key 含 run id 避免并发 / 同名覆盖；EC2 拉完会主动 delete。
+          S3_KEY="artifacts/${ENV_NAME}/${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-${GITHUB_SHA::8}.tar.gz"
+          S3_URI="s3://${BUILD_BUCKET}/${S3_KEY}"
+          aws s3 cp /tmp/litellm-overlay.tar.gz "${S3_URI}" \
+            --no-progress \
+            --metadata "md5=${MD5},sha=${GITHUB_SHA},run-id=${GITHUB_RUN_ID}"
+          echo "Uploaded to ${S3_URI}"
+          echo "s3_uri=${S3_URI}" >> "$GITHUB_OUTPUT"
+          echo "expected_md5=${MD5}" >> "$GITHUB_OUTPUT"
+
+      - name: SSM 拉 S3 + docker build + 替换容器
+        if: steps.mode.outputs.action_mode == 'build-and-restart'
+        id: build
+        run: |
+          set -euo pipefail
+          OVERLAY_DIR='${{ steps.target.outputs.overlay_dir }}'
+          REMOTE_DIR='${{ steps.target.outputs.remote_dir }}'
+          CONFIG_SRC='${{ steps.target.outputs.config_src }}'
+          IMAGE_REPO='${{ steps.target.outputs.image_repo }}'
+          CONTAINER='${{ steps.target.outputs.container }}'
+          S3_URI='${{ steps.upload.outputs.s3_uri }}'
+          EXPECTED_MD5='${{ steps.upload.outputs.expected_md5 }}'
+          NEW_TAG="gha-${GITHUB_SHA::8}"
+          DEPLOY_ID="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          BAK_NAME="${CONTAINER}-bak-${DEPLOY_ID}"
+          echo "new_tag=${NEW_TAG}" >> "$GITHUB_OUTPUT"
+          echo "bak_name=${BAK_NAME}" >> "$GITHUB_OUTPUT"
+
+          # 把所有远端逻辑塞进一个 SSM 命令；避免多次 SSM 往返。
+          # 用 heredoc 写一个独立的 shell 脚本到 /tmp，再执行——shell 比 SSM
+          # commands 数组里转义复杂表达式好维护。
+          cat > /tmp/litellm-build.sh <<EOF
+          #!/bin/bash
+          set -euo pipefail
+          OVERLAY_DIR='${OVERLAY_DIR}'
+          REMOTE_DIR='${REMOTE_DIR}'
+          CONFIG_SRC='${CONFIG_SRC}'
+          S3_URI='${S3_URI}'
+          EXPECTED_MD5='${EXPECTED_MD5}'
+          IMAGE_REPO='${IMAGE_REPO}'
+          NEW_TAG='${NEW_TAG}'
+          ENV_NAME='${ENV_NAME}'
+          CONTAINER='${CONTAINER}'
+          BAK_NAME='${BAK_NAME}'
+          CONFIG_BACKUP="\$REMOTE_DIR/config.yaml.bak.${DEPLOY_ID}"
+          CONFIG_NEXT="\$REMOTE_DIR/config.yaml.next.${DEPLOY_ID}"
+          STAGING_DIR="/tmp/litellm-overlay-staging-${DEPLOY_ID}"
+
+          # 1) 从 S3 拉 tar + md5 校验。EC2 instance role
+          #    (litellm-build-bucket-read inline policy) 只允许读 artifacts/ 前缀。
+          REMOTE_TAR=/tmp/litellm-overlay-${DEPLOY_ID}.tar.gz
+          aws s3 cp "\$S3_URI" "\$REMOTE_TAR" --no-progress
+          GOT=\$(md5sum "\$REMOTE_TAR" | awk '{print \$1}')
+          if [ "\$GOT" != "\$EXPECTED_MD5" ]; then
+            echo "tar md5 mismatch: got=\$GOT expected=\$EXPECTED_MD5" >&2
+            exit 1
+          fi
+          # 拉下来后立刻删 S3 对象，避免 build bucket 长期堆积
+          aws s3 rm "\$S3_URI" || true
+
+          sudo mkdir -p "\$OVERLAY_DIR"
+          # 解压到 overlay_dir：
+          #   - litellm/ 整个目录覆盖（cp -a 合并，不删 overlay_dir 里多余的文件）
+          #   - Dockerfile.overlay → overlay_dir/Dockerfile（build 入口）
+          rm -rf "\$STAGING_DIR"
+          mkdir -p "\$STAGING_DIR"
+          tar -xzf "\$REMOTE_TAR" -C "\$STAGING_DIR"
+          sudo cp -a "\$STAGING_DIR/litellm/." "\$OVERLAY_DIR/litellm/"
+          sudo cp -a "\$STAGING_DIR/deploy/Dockerfile.overlay" "\$OVERLAY_DIR/Dockerfile"
+          rm -f "\$REMOTE_TAR"
+
+          # 2) docker build
+          sudo docker build -t "\$IMAGE_REPO:\$NEW_TAG" "\$OVERLAY_DIR"
+
+          # 只有镜像构建和新配置解析都成功后才切换 bind mount 真相源。
+          # 临时文件与 config.yaml 位于同一目录，mv 是同文件系统原子替换。
+          sudo docker run --rm --entrypoint python \
+            -v "\$STAGING_DIR/\$CONFIG_SRC:/tmp/config.yaml:ro" \
+            "\$IMAGE_REPO:\$NEW_TAG" \
+            -c "import yaml; yaml.safe_load(open('/tmp/config.yaml'))"
+          if [ -f "\$REMOTE_DIR/config.yaml" ]; then
+            sudo cp "\$REMOTE_DIR/config.yaml" "\$CONFIG_BACKUP"
+          fi
+          sudo install -o root -g root -m 0644 \
+            "\$STAGING_DIR/\$CONFIG_SRC" "\$CONFIG_NEXT"
+          sudo mv "\$CONFIG_NEXT" "\$REMOTE_DIR/config.yaml"
+          rm -rf "\$STAGING_DIR"
+
+          # 3) 抓现容器配置：env / port / volume / network
+          ENV_FILE=\$(mktemp)
+          # 过滤系统 PATH 等 docker 自动注入项，保留受管 REDIS_URL（TEST DB14 / PROD DB15）。
+          sudo docker inspect "\$CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' \
+            | grep -vE '^(PATH=|HOSTNAME=|HOME=|TERM=|LANG=|LC_|GPG_KEY=|PYTHON_|UV_|VIRTUAL_ENV=|_=)' \
+            > "\$ENV_FILE" || true
+          NETWORK=\$(sudo docker inspect "\$CONTAINER" --format '{{.HostConfig.NetworkMode}}')
+          # TEST 绑定 0.0.0.0:4001 兼容本机健康检查，由安全组限制 H1 入口访问。
+          PORT_MAP=\$(sudo docker inspect "\$CONTAINER" --format '{{json .HostConfig.PortBindings}}' \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); k=list(d.keys())[0]; b=d[k][0]; print(f\"{b['HostIp']}:{b['HostPort']}:{k.split('/')[0]}\")")
+          # Binds: ["host:container", ...]
+          BINDS=\$(sudo docker inspect "\$CONTAINER" --format '{{json .HostConfig.Binds}}' \
+            | python3 -c "import json,sys; d=json.load(sys.stdin) or []; print(' '.join(f'-v {b}' for b in d))")
+          CMD_JSON=\$(sudo docker inspect "\$CONTAINER" --format '{{json .Config.Cmd}}')
+          CMD_ARGS=\$(python3 -c "import json,sys; print(' '.join(json.loads(sys.argv[1]) or []))" "\$CMD_JSON")
+          echo "Network=\$NETWORK Port=\$PORT_MAP"
+
+          # 4) rename 旧容器作为 rollback 备份 + 启新容器
+          sudo docker stop "\$CONTAINER"
+          sudo docker rename "\$CONTAINER" "\$BAK_NAME"
+          # --env-file 不接受空文件，加个判断
+          ENV_ARG=""
+          if [ -s "\$ENV_FILE" ]; then ENV_ARG="--env-file \$ENV_FILE"; fi
+          # TEST H3b 与生产 H1 都共宿现行服务，替换容器必须保留内存上限。
+          MEMORY_ARGS="--memory 2g --memory-swap 2g"
+          # 重启策略必须显式固定：docker inspect 复制的只有 env/port/volume/network，
+          # 漏掉它会让新容器默认 restart=no，EC2 重启后生产和 TEST 网关都不会自启。
+          sudo docker run -d --name "\$CONTAINER" \
+            --restart unless-stopped \
+            \$MEMORY_ARGS \
+            --network "\$NETWORK" \
+            -p "\$PORT_MAP" \
+            \$BINDS \
+            \$ENV_ARG \
+            "\$IMAGE_REPO:\$NEW_TAG" \
+            \$CMD_ARGS
+          rm -f "\$ENV_FILE"
+          sudo docker ps --filter "name=^\${CONTAINER}\$" --format '{{.Names}} {{.Image}} {{.Status}}'
+          EOF
+          B64SCRIPT=$(base64 < /tmp/litellm-build.sh | tr -d '\n')
+
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm build ${ENV_NAME} run=${GITHUB_RUN_ID}" \
+            --parameters "commands=[\"echo ${B64SCRIPT} | base64 -d > /tmp/litellm-build-${DEPLOY_ID}.sh && bash /tmp/litellm-build-${DEPLOY_ID}.sh\"]" \
+            --query 'Command.CommandId' --output text)
+          echo "command_id=$CID" >> "$GITHUB_OUTPUT"
+          echo "build command: $CID"
+          # docker build 可能要 30s-2min，给 8 分钟窗口
+          for _ in $(seq 1 96); do
+            sleep 5
+            S=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "${INSTANCE_ID}" --query Status --output text 2>/dev/null || echo Pending)
+            case "$S" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation --command-id "$CID" --instance-id "${INSTANCE_ID}" --query "{O:StandardOutputContent,E:StandardErrorContent}" --output json >&2
+                exit 1
+                ;;
+            esac
+          done
+          if [ "$S" != "Success" ]; then
+            echo "build poll timeout; cancelling remote command" >&2
+            aws ssm cancel-command --command-id "$CID" --instance-ids "${INSTANCE_ID}" >/dev/null || true
+            for _ in $(seq 1 24); do
+              S=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "${INSTANCE_ID}" --query Status --output text 2>/dev/null || echo Pending)
+              case "$S" in Success|Failed|Cancelled|TimedOut) break ;; esac
+              sleep 5
+            done
+            case "$S" in Success|Failed|Cancelled|TimedOut) ;; *) echo "remote build did not stop; refusing rollback" >&2 ;; esac
+            exit 1
+          fi
+          echo "CID=$CID" >> "$GITHUB_ENV"
+
+      - name: SSM 仅重启
+        if: steps.mode.outputs.action_mode == 'restart'
+        run: |
+          set -euo pipefail
+          CONTAINER='${{ steps.target.outputs.container }}'
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm restart ${ENV_NAME} by GHA ${GITHUB_RUN_ID}" \
+            --parameters "commands=[\"sudo docker restart '${CONTAINER}'\"]" \
+            --query "Command.CommandId" --output text)
+          echo "command_id=$CID"
+          echo "CID=$CID" >> "$GITHUB_ENV"
+
+      # 等 SSM 命令跑完。aws ssm wait 默认 delay 5s / max 20 次 = 100s，
+      # config 同步 + docker restart 一般很快（<10s）；build 路径在前一步已经
+      # 自己 poll 过了，这里只是把状态收回来便于调试。
+      - name: 等待 SSM 命令结果（sync / restart 路径）
+        if: steps.mode.outputs.action_mode == 'sync-and-restart' || steps.mode.outputs.action_mode == 'restart'
+        run: |
+          set -euo pipefail
+          aws ssm wait command-executed \
+            --command-id "$CID" \
+            --instance-id "${INSTANCE_ID}" || true
+          aws ssm get-command-invocation \
+            --command-id "$CID" \
+            --instance-id "${INSTANCE_ID}" \
+            --query "{S:Status,O:StandardOutputContent,E:StandardErrorContent}" \
+            --output json | tee /tmp/ssm-result.json
+          STATUS=$(jq -r '.S' /tmp/ssm-result.json)
+          if [ "$STATUS" != "Success" ]; then
+            echo "SSM 命令失败: $STATUS" >&2
+            exit 1
+          fi
+
+      # 本机 readiness 不经过 Caddy，并且会实际查询数据库。不能只探
+      # liveliness：Prisma query engine 断开时进程仍会对 liveliness 返回 200。
+      # 关键：LiteLLM 首次启动要跑 prisma migrate + sanity check，
+      # 通常 20-40s，偶尔更久。所以远端 curl 窗口给到 3 分钟（36*5s），
+      # runner 侧自建轮询也给 4 分钟（48*5s）防 SSM wait 100s 超时误判。
+      - name: 健康检查（SSM 远端）
+        # id 用于收窄下面「自动回滚」的触发范围：只有健康检查本身失败/被跳过
+        # （即容器替换链路——build/health 出问题）才回滚；健康检查通过之后的
+        # 收敛类步骤（YAML 路由 / 网关 key）失败不应该把已经跑通的新镜像退回去。
+        id: health
+        if: steps.mode.outputs.action_mode != 'sync-multimedia-only'
+        run: |
+          set -euo pipefail
+          PORT='${{ steps.target.outputs.local_port }}'
+          CONTAINER='${{ steps.target.outputs.container }}'
+          SCRIPT_B64=$(base64 < scripts/check_gateway_readiness.py | tr -d '\n')
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm health ${ENV_NAME} by GHA ${GITHUB_RUN_ID}" \
+            --parameters "commands=[\"echo '${SCRIPT_B64}' | base64 -d | sudo docker exec -i '${CONTAINER}' python -\"]" \
+            --query "Command.CommandId" --output text)
+          echo "health command: $CID"
+          # runner 侧自建 poll，避免 aws ssm wait 的 100s 硬上限比远端窗口还短
+          for attempt in $(seq 1 48); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CID" \
+              --instance-id "${INSTANCE_ID}" \
+              --query "Status" --output text 2>/dev/null || echo "")
+            case "$STATUS" in
+              Success) echo "health poll $attempt: $STATUS"; break ;;
+              Failed|Cancelled|TimedOut)
+                echo "health poll $attempt: $STATUS" >&2
+                aws ssm get-command-invocation \
+                  --command-id "$CID" \
+                  --instance-id "${INSTANCE_ID}" \
+                  --query "{O:StandardOutputContent,E:StandardErrorContent}" \
+                  --output json >&2
+                exit 1 ;;
+              *) echo "health poll $attempt: $STATUS (continue)" ;;
+            esac
+          done
+          if [ "$STATUS" != "Success" ]; then
+            echo "runner 侧 poll 超时（>4 分钟）" >&2
+            exit 1
+          fi
+          aws ssm get-command-invocation \
+            --command-id "$CID" \
+            --instance-id "${INSTANCE_ID}" \
+            --query "StandardOutputContent" --output text | tail -5
+
+      # Back up route ids/bindings before any DB deletion; private values never enter the snapshot.
+      - name: 删除前备份 DB 路由字段（不含凭据）
+        if: env.SKIP_RECONCILIATION != 'true' && (steps.mode.outputs.action_mode == 'sync-and-restart' || steps.mode.outputs.action_mode == 'build-and-restart')
+        run: |
+          set -euo pipefail
+          CONTAINER='${{ steps.target.outputs.container }}'
+          SCRIPT_B64=$(base64 < scripts/reconcile_aliyun_v41_route.py | tr -d '\n')
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm provision aliyun v41 ${ENV_NAME} by GHA ${GITHUB_RUN_ID}" \
+            --parameters "commands=[\"echo '${SCRIPT_B64}' | base64 -d | sudo docker exec -i '${CONTAINER}' python - --export-only --export /tmp/openrouter-before-delete.json && sudo docker cp '${CONTAINER}:/tmp/openrouter-before-delete.json' '${{ steps.target.outputs.remote_dir }}/routes.before-delete.${GITHUB_RUN_ID}.json'\"]" \
+            --query "Command.CommandId" --output text)
+          for attempt in $(seq 1 120); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+              --query "Status" --output text 2>/dev/null || echo "")
+            case "$STATUS" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation \
+                  --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+                  --query "{O:StandardOutputContent,E:StandardErrorContent}" --output json >&2
+                exit 1 ;;
+            esac
+          done
+          if [ "$STATUS" != "Success" ]; then
+            echo "route reconciliation poll timeout" >&2
+            exit 1
+          fi
+          aws ssm get-command-invocation \
+            --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+            --query "StandardOutputContent" --output text
+
+      # Private Aliyun source is immutable; only YAML opt-in creates a new DB route.
+      - name: 新增阿里云 V4.1 私有 deployment
+        if: env.SKIP_RECONCILIATION != 'true' && (steps.mode.outputs.action_mode == 'sync-and-restart' || steps.mode.outputs.action_mode == 'build-and-restart')
+        run: |
+          set -euo pipefail
+          CONTAINER='${{ steps.target.outputs.container }}'
+          SCRIPT_B64=$(base64 < scripts/reconcile_aliyun_v41_route.py | tr -d '\n')
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm provision aliyun v41 ${ENV_NAME} by GHA ${GITHUB_RUN_ID}" \
+            --parameters "commands=[\"echo '${SCRIPT_B64}' | base64 -d | sudo docker exec -i '${CONTAINER}' python -\"]" \
+            --query "Command.CommandId" --output text)
+          for attempt in $(seq 1 120); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+              --query "Status" --output text 2>/dev/null || echo "")
+            case "$STATUS" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation \
+                  --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+                  --query "{O:StandardOutputContent,E:StandardErrorContent}" --output json >&2
+                exit 1 ;;
+            esac
+          done
+          if [ "$STATUS" != "Success" ]; then
+            echo "route reconciliation poll timeout" >&2
+            exit 1
+          fi
+          aws ssm get-command-invocation \
+            --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+            --query "StandardOutputContent" --output text
+
+      # YAML 和数据库路由会同时加载。对已经验证可用的 managed alias，必须在
+      # 重启后删除同名 DB deployment，否则 simple-shuffle 仍可能命中旧 provider。
+      - name: 收敛 YAML 管理的模型路由
+        if: env.SKIP_RECONCILIATION != 'true' && (steps.mode.outputs.action_mode == 'sync-and-restart' || steps.mode.outputs.action_mode == 'build-and-restart')
+        run: |
+          set -euo pipefail
+          CONTAINER='${{ steps.target.outputs.container }}'
+          SCRIPT_B64=$(base64 < scripts/reconcile_managed_model_routes.py | tr -d '\n')
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm reconcile routes ${ENV_NAME} by GHA ${GITHUB_RUN_ID}" \
+            --parameters "commands=[\"echo '${SCRIPT_B64}' | base64 -d | sudo docker exec -i '${CONTAINER}' python - --base-url 'http://127.0.0.1:4000' --environment '${ENV_NAME}'\"]" \
+            --query "Command.CommandId" --output text)
+          for attempt in $(seq 1 120); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+              --query "Status" --output text 2>/dev/null || echo "")
+            case "$STATUS" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation \
+                  --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+                  --query "{O:StandardOutputContent,E:StandardErrorContent}" --output json >&2
+                exit 1 ;;
+            esac
+          done
+          if [ "$STATUS" != "Success" ]; then
+            echo "route reconciliation poll timeout" >&2
+            exit 1
+          fi
+          aws ssm get-command-invocation \
+            --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+            --query "StandardOutputContent" --output text
+
+      # Kollab Server 使用的长期业务 key 还有独立模型权限。路由可用并不代表
+      # key 已获准访问；这里按固定 alias 增量补齐并回读，避免手工授权再次漂移。
+      - name: 收敛 Kollab 网关 key 模型权限
+        if: env.SKIP_RECONCILIATION != 'true' && (steps.mode.outputs.action_mode == 'sync-and-restart' || steps.mode.outputs.action_mode == 'build-and-restart')
+        run: |
+          set -euo pipefail
+          CONTAINER='${{ steps.target.outputs.container }}'
+          SCRIPT_B64=$(base64 < scripts/reconcile_gateway_key_models.py | tr -d '\n')
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm reconcile gateway key ${ENV_NAME} by GHA ${GITHUB_RUN_ID}" \
+            --parameters "commands=[\"echo '${SCRIPT_B64}' | base64 -d | sudo docker exec -i '${CONTAINER}' python - --base-url 'http://127.0.0.1:4000' --environment '${ENV_NAME}'\"]" \
+            --query "Command.CommandId" --output text)
+          for attempt in $(seq 1 24); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+              --query "Status" --output text 2>/dev/null || echo "")
+            case "$STATUS" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation \
+                  --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+                  --query "{O:StandardOutputContent,E:StandardErrorContent}" --output json >&2
+                exit 1 ;;
+            esac
+          done
+          if [ "$STATUS" != "Success" ]; then
+            echo "gateway key reconciliation poll timeout" >&2
+            exit 1
+          fi
+          aws ssm get-command-invocation \
+            --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+            --query "StandardOutputContent" --output text
+
+      # build-and-restart 路径专属：build / 容器替换 / health check 失败时自动 rollback。
+      # rename bak 容器回来 + start，恢复到上一版 image。
+      #
+      # 只看 steps.health.outcome，不看整体 job failure()：health 之后的「收敛 YAML
+      # 管理的模型路由」「收敛 Kollab 网关 key 模型权限」两步失败也会让 job 整体
+      # failure()，但那是路由/权限收敛出问题，不是新镜像本身有问题——回滚只会把已经
+      # 验证健康的新镜像退回旧版，不解决收敛失败,还会掩盖“新镜像其实是好的”这一事实。
+      # steps.health.outcome != 'success' 同时覆盖两种需要回滚的情况：
+      #   - health 步骤本身失败（outcome=failure）
+      #   - health 之前的 build 步骤已经失败，health 被跳过（outcome=skipped）
+      # health 成功之后（outcome=success）的任何失败都不再满足这个条件，因此不回滚，
+      # 但该步骤自身仍以失败状态结束、job 仍标红，失败可见性不受影响。
+      # A traffic veto stays visible but cannot skip earlier route/key convergence.
+      - name: 最后退役无流量的 OpenRouter 聊天路由
+        if: env.SKIP_RECONCILIATION != 'true' && (steps.mode.outputs.action_mode == 'sync-and-restart' || steps.mode.outputs.action_mode == 'build-and-restart')
+        run: |
+          set -euo pipefail
+          CONTAINER='${{ steps.target.outputs.container }}'
+          SCRIPT_B64=$(base64 < scripts/reconcile_aliyun_v41_route.py | tr -d '\n')
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm retire inactive openrouter ${ENV_NAME} by GHA ${GITHUB_RUN_ID}" \
+            --parameters "commands=[\"echo '${SCRIPT_B64}' | base64 -d | sudo docker exec -i '${CONTAINER}' python - --retire-only --export /tmp/openrouter-retired-routes.json\"]" \
+            --query "Command.CommandId" --output text)
+          for attempt in $(seq 1 120); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+              --query "Status" --output text 2>/dev/null || echo "")
+            case "$STATUS" in
+              Success) break ;;
+              Failed|Cancelled|TimedOut)
+                aws ssm get-command-invocation \
+                  --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+                  --query "{O:StandardOutputContent,E:StandardErrorContent}" --output json >&2
+                exit 1 ;;
+            esac
+          done
+          if [ "$STATUS" != "Success" ]; then
+            echo "route reconciliation poll timeout" >&2
+            exit 1
+          fi
+          aws ssm get-command-invocation \
+            --command-id "$CID" --instance-id "${INSTANCE_ID}" \
+            --query "StandardOutputContent" --output text
+
+
+      - name: 自动回滚（build-and-restart 失败时）
+        if: (failure() || cancelled()) && steps.mode.outputs.action_mode == 'build-and-restart' && steps.build.outputs.bak_name && steps.build.outputs.command_id && steps.health.outcome != 'success'
+        run: |
+          set -euo pipefail
+          CONTAINER='${{ steps.target.outputs.container }}'
+          BAK_NAME='${{ steps.build.outputs.bak_name }}'
+          NEW_TAG='${{ steps.build.outputs.new_tag }}'
+          IMAGE_REPO='${{ steps.target.outputs.image_repo }}'
+          REMOTE_DIR='${{ steps.target.outputs.remote_dir }}'
+          BUILD_CID='${{ steps.build.outputs.command_id }}'
+          DEPLOY_ID='${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}'
+          echo "::error::Build 部署失败，自动回滚到 ${BAK_NAME}"
+          # SSM 命令脱离 runner 执行。先取消并确认它进入终态，避免远端构建
+          # 与回滚同时切换同一个 config/container。
+          aws ssm cancel-command --command-id "$BUILD_CID" --instance-ids "${INSTANCE_ID}" >/dev/null || true
+          BUILD_STATUS=""
+          for _ in $(seq 1 24); do
+            BUILD_STATUS=$(aws ssm get-command-invocation --command-id "$BUILD_CID" --instance-id "${INSTANCE_ID}" --query Status --output text 2>/dev/null || echo Pending)
+            case "$BUILD_STATUS" in Success|Failed|Cancelled|TimedOut) break ;; esac
+            sleep 5
+          done
+          case "$BUILD_STATUS" in
+            Success|Failed|Cancelled|TimedOut) ;;
+            *) echo "远端构建尚未停止，拒绝并发回滚" >&2; exit 1 ;;
+          esac
+          CID=$(aws ssm send-command \
+            --instance-ids "${INSTANCE_ID}" \
+            --document-name AWS-RunShellScript \
+            --comment "litellm rollback ${ENV_NAME} run=${GITHUB_RUN_ID}" \
+            --parameters "commands=[
+              \"set -e\",
+              \"if [ -f '${REMOTE_DIR}/config.yaml.bak.${DEPLOY_ID}' ]; then sudo cp '${REMOTE_DIR}/config.yaml.bak.${DEPLOY_ID}' '${REMOTE_DIR}/config.yaml.rollback.${DEPLOY_ID}' && sudo mv '${REMOTE_DIR}/config.yaml.rollback.${DEPLOY_ID}' '${REMOTE_DIR}/config.yaml'; fi\",
+              \"if sudo docker inspect '${BAK_NAME}' >/dev/null 2>&1; then sudo docker stop '${CONTAINER}' || true; sudo docker rm '${CONTAINER}' || true; sudo docker rename '${BAK_NAME}' '${CONTAINER}'; sudo docker start '${CONTAINER}'; else sudo docker start '${CONTAINER}' || true; fi\",
+              \"sudo docker update --restart unless-stopped '${CONTAINER}' >/dev/null\",
+              \"sudo docker inspect '${CONTAINER}' --format '{{.State.Running}} {{.HostConfig.RestartPolicy.Name}}' | grep -qx 'true unless-stopped'\",
+              \"sudo docker ps --filter name=^${CONTAINER}\\\$ --format '{{.Names}} {{.Image}} {{.Status}}'\"
+            ]" \
+            --query 'Command.CommandId' --output text)
+          for _ in $(seq 1 24); do
+            sleep 5
+            S=$(aws ssm get-command-invocation --command-id "$CID" --instance-id "${INSTANCE_ID}" --query Status --output text 2>/dev/null || echo Pending)
+            [ "$S" = "Success" ] && break
+            if [ "$S" = "Failed" ] || [ "$S" = "Cancelled" ] || [ "$S" = "TimedOut" ]; then
+              aws ssm get-command-invocation --command-id "$CID" --instance-id "${INSTANCE_ID}" --query "{O:StandardOutputContent,E:StandardErrorContent}" --output json >&2
+              exit 1
+            fi
+          done
+          if [ "$S" != "Success" ]; then
+            echo "回滚未在等待窗口内成功完成，需人工检查容器与重启策略" >&2
+            exit 1
+          fi
+          echo "::error::已回滚到 ${BAK_NAME}。失败 image ${IMAGE_REPO}:${NEW_TAG} 仍保留在 EC2 上待排查。"
+
+      - name: 回滚提示（sync-and-restart）
+        if: failure() && steps.mode.outputs.action_mode == 'sync-and-restart'
+        run: |
+          echo "::error title=Deploy failed::部署失败。用 SSM 回滚："
+          echo "::error::aws ssm send-command --instance-ids ${INSTANCE_ID} --document-name AWS-RunShellScript \\"
+          echo "::error::  --parameters 'commands=[\"ls -t ${{ steps.target.outputs.remote_dir }}/config.yaml.bak.* | head -1 | xargs -I{} sudo cp {} ${{ steps.target.outputs.remote_dir }}/config.yaml\",\"sudo docker restart ${{ steps.target.outputs.container }}\"]'"

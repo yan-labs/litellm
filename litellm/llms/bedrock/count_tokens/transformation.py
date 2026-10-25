@@ -88,18 +88,20 @@ class BedrockCountTokensConfig(BaseAWSLLM):
         system = request_data.get("system")
         tools = request_data.get("tools")
 
-        # Transform messages
+        # Transform messages. Bedrock Converse rejects empty content arrays, while
+        # Anthropic-compatible clients can send empty historical turns. Empty
+        # turns carry no token-bearing content, so omit them from CountTokens.
         user_messages = []
         for message in messages:
+            transformed_content = self._transform_message_content(
+                message.get("content", "")
+            )
+            if not transformed_content:
+                continue
             transformed_message: Dict[str, Any] = {
                 "role": message.get("role"),
-                "content": [],
+                "content": transformed_content,
             }
-            content = message.get("content", "")
-            if isinstance(content, str):
-                transformed_message["content"].append({"text": content})
-            elif isinstance(content, list):
-                transformed_message["content"] = content
             user_messages.append(transformed_message)
 
         converse_input: Dict[str, Any] = {"messages": user_messages}
@@ -115,6 +117,117 @@ class BedrockCountTokensConfig(BaseAWSLLM):
             converse_input["toolConfig"] = tool_config
 
         return {"input": {"converse": converse_input}}
+
+    def _transform_message_content(self, content: Any) -> List[Dict[str, Any]]:
+        transformed_content: List[Dict[str, Any]] = []
+
+        if isinstance(content, str):
+            if content:
+                transformed_content.append({"text": content})
+            return transformed_content
+
+        if isinstance(content, list):
+            for block in content:
+                transformed_block = self._transform_content_block(block)
+                if transformed_block:
+                    transformed_content.append(transformed_block)
+            return transformed_content
+
+        if content is None:
+            return transformed_content
+
+        transformed_content.append({"text": str(content)})
+        return transformed_content
+
+    def _transform_content_block(self, block: Any) -> Optional[Dict[str, Any]]:
+        if isinstance(block, str):
+            return {"text": block} if block else None
+        if not isinstance(block, dict):
+            return {"text": str(block)}
+
+        block_type = block.get("type")
+        if block_type == "text":
+            text = block.get("text", "")
+            return {"text": text} if text else None
+        if block_type == "image":
+            return self._transform_anthropic_image_block(block)
+        if block_type == "document":
+            return self._transform_anthropic_document_block(block)
+        if block_type == "thinking":
+            thinking = block.get("thinking", "")
+            return {"text": thinking} if thinking else None
+
+        # Already in Bedrock Converse shape or a future provider-native block.
+        if any(
+            key in block
+            for key in ("text", "image", "document", "toolUse", "toolResult")
+        ):
+            return block
+
+        text = self._extract_text_from_unknown_block(block)
+        return {"text": text} if text else None
+
+    def _transform_anthropic_image_block(
+        self, block: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        source = block.get("source")
+        if not isinstance(source, dict):
+            return None
+
+        source_type = source.get("type")
+        if source_type == "base64":
+            media_type = source.get("media_type", "")
+            image_format = self._format_from_media_type(media_type)
+            data = source.get("data")
+            if image_format and data:
+                return {
+                    "image": {
+                        "format": image_format,
+                        "source": {"bytes": data},
+                    }
+                }
+
+        return None
+
+    def _transform_anthropic_document_block(
+        self, block: Dict[str, Any]
+    ) -> Optional[Dict[str, Any]]:
+        source = block.get("source")
+        if isinstance(source, dict) and source.get("type") == "base64":
+            media_type = source.get("media_type", "")
+            document_format = self._format_from_media_type(media_type)
+            data = source.get("data")
+            if document_format and data:
+                return {
+                    "document": {
+                        "format": document_format,
+                        "name": block.get("title") or "Document",
+                        "source": {"bytes": data},
+                    }
+                }
+
+        text = self._extract_text_from_unknown_block(block)
+        return {"text": text} if text else None
+
+    @staticmethod
+    def _format_from_media_type(media_type: str) -> Optional[str]:
+        if not media_type or "/" not in media_type:
+            return None
+        media_format = media_type.rsplit("/", 1)[1].lower()
+        if media_format == "jpg":
+            return "jpeg"
+        if media_format == "plain":
+            return "txt"
+        return media_format
+
+    @staticmethod
+    def _extract_text_from_unknown_block(block: Dict[str, Any]) -> str:
+        text_parts: List[str] = []
+        for key in ("text", "content", "input", "query", "name", "title", "context"):
+            value = block.get(key)
+            if isinstance(value, str) and value:
+                text_parts.append(value)
+        return "\n".join(text_parts)
 
     def _transform_system(self, system: Optional[Any]) -> List[Dict[str, Any]]:
         """Transform Anthropic system prompt to Bedrock system blocks."""

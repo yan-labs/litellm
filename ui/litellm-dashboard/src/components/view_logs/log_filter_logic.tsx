@@ -16,6 +16,7 @@ const FILTER_KEYS = {
   MODEL: "Model",
   USER_ID: "User ID",
   END_USER: "End User",
+  REQUEST_TAG: "Tag",
   STATUS: "Status",
   KEY_ALIAS: "Key Alias",
   ERROR_CODE: "Error Code",
@@ -60,6 +61,7 @@ export function useLogFilterLogic({
       [FILTER_KEYS.MODEL]: "",
       [FILTER_KEYS.USER_ID]: "",
       [FILTER_KEYS.END_USER]: "",
+      [FILTER_KEYS.REQUEST_TAG]: "",
       [FILTER_KEYS.STATUS]: "",
       [FILTER_KEYS.KEY_ALIAS]: "",
       [FILTER_KEYS.ERROR_CODE]: "",
@@ -103,6 +105,7 @@ export function useLogFilterLogic({
             request_id: filters[FILTER_KEYS.REQUEST_ID] || undefined,
             user_id: filters[FILTER_KEYS.USER_ID] || undefined,
             end_user: filters[FILTER_KEYS.END_USER] || undefined,
+            request_tag: filters[FILTER_KEYS.REQUEST_TAG] || undefined,
             status_filter: filters[FILTER_KEYS.STATUS] || undefined,
             model_id: filters[FILTER_KEYS.MODEL] || undefined,
             key_alias: filters[FILTER_KEYS.KEY_ALIAS] || undefined,
@@ -141,6 +144,7 @@ export function useLogFilterLogic({
         filters[FILTER_KEYS.REQUEST_ID] ||
         filters[FILTER_KEYS.USER_ID] ||
         filters[FILTER_KEYS.END_USER] ||
+        filters[FILTER_KEYS.REQUEST_TAG] ||
         filters[FILTER_KEYS.ERROR_CODE] ||
         filters[FILTER_KEYS.ERROR_MESSAGE] ||
         filters[FILTER_KEYS.MODEL]

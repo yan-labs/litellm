@@ -1,4 +1,6 @@
-# This file runs a health check for the LLM, used on litellm/proxy
+"""Proxy health dispatcher used by background and deployment checks.
+Explicitly disabled deployments are left for bounded natural product samples.
+"""
 
 import asyncio
 import logging
@@ -51,9 +53,9 @@ def _rss_mb_for_log() -> str:
 
 def _get_random_llm_message():
     """
-    Get a random message from the LLM.
+    Supply a natural daily-life question for proxy health checks, avoiding probe phrases.
     """
-    messages = ["Hey how's it going?", "What's 1 + 1?"]
+    messages = ["第一次去云南大理，想住在洱海边，应该选古城还是双廊？大概各自适合什么样的人？", "我下个月想带爸妈去京都玩四天，他们腿脚不太方便，帮我排一个轻松一点的行程，顺便说说住哪个区域比较合适。"]
 
     return [{"role": "user", "content": random.choice(messages)}]
 
@@ -99,6 +101,7 @@ async def run_with_timeout(task, timeout):
 
 
 async def _run_model_health_check(model: dict):
+    """Dispatch one selected proxy deployment with natural input and bounded timeout."""
     litellm_params = model["litellm_params"]
     model_info = model.get("model_info", {})
     mode = model_info.get("mode", None)
@@ -109,8 +112,8 @@ async def _run_model_health_check(model: dict):
         litellm.ahealth_check(
             litellm_params,
             mode=mode,
-            prompt=DEFAULT_HEALTH_CHECK_PROMPT,
-            input=["test from litellm"],
+            prompt="第一次去云南大理，想住在洱海边，应该选古城还是双廊？大概各自适合什么样的人？",
+            input=["第一次去云南大理，想住在洱海边，应该选古城还是双廊？大概各自适合什么样的人？"],
         ),
         timeout,
     )
@@ -324,6 +327,9 @@ async def perform_health_check(
                 )
             return [], []
 
+    # Paid/policy-sensitive deployments use explicit natural acceptance samples.
+    # Exclusion reports no synthetic success and prevents unattended extra calls.
+    model_list = [m for m in model_list if not (m.get("model_info") or {}).get("disable_health_check")]
     cycle_start_time = time.monotonic()
     requested_model_count = len(model_list)
 

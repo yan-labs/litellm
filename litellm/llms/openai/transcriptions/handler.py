@@ -13,6 +13,11 @@ from litellm.litellm_core_utils.litellm_logging import Logging as LiteLLMLogging
 from litellm.llms.base_llm.audio_transcription.transformation import (
     BaseAudioTranscriptionConfig,
 )
+from litellm.llms.openrouter.audio_catalog import (
+    is_openrouter_api_base,
+    validate_audio_model,
+    validate_audio_model_async,
+)
 from litellm.types.utils import FileTypes
 from litellm.utils import (
     TranscriptionResponse,
@@ -141,6 +146,8 @@ class OpenAIAudioTranscription(OpenAIChatCompletion):
                 "complete_input_dict": data,
             },
         )
+        if is_openrouter_api_base(api_base):
+            validate_audio_model(data["model"], "transcription")
         _, response = self.make_sync_openai_audio_transcriptions_request(
             openai_client=openai_client,
             data=data,
@@ -197,6 +204,8 @@ class OpenAIAudioTranscription(OpenAIChatCompletion):
                     "complete_input_dict": data,
                 },
             )
+            if is_openrouter_api_base(api_base):
+                await validate_audio_model_async(data["model"], "transcription")
             headers, response = await self.make_openai_audio_transcriptions_request(
                 openai_aclient=openai_aclient,
                 data=data,

@@ -1,5 +1,16 @@
+"""HTTP provider handler for LiteLLM model requests.
+
+Kollab instruments the Anthropic Messages path in this shared handler because
+it is the narrow point where provider configuration, request signing, the
+actual upstream POST, and the first response headers can be separated. The
+latency logs deliberately avoid request/response bodies and credentials.
+"""
+
+import asyncio
 import json
+import os
 import ssl
+from urllib.parse import urlparse
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -21,10 +32,11 @@ import litellm
 import litellm.litellm_core_utils
 import litellm.types
 import litellm.types.utils
-from litellm._logging import verbose_logger
+from litellm._logging import _redact_string, verbose_logger
 from litellm.anthropic_beta_headers_manager import update_headers_with_filtered_beta
 from litellm.constants import REALTIME_WEBSOCKET_MAX_MESSAGE_SIZE_BYTES
 from litellm.litellm_core_utils.realtime_streaming import RealTimeStreaming
+from litellm.proxy.kollab_latency_debug import latency_now, log_latency_stage
 from litellm.llms.base_llm.anthropic_messages.transformation import (
     BaseAnthropicMessagesConfig,
 )
@@ -150,7 +162,120 @@ else:
     LiteLLMLoggingObj = Any
 
 
+# Pre-headers budget for Anthropic /v1/messages streaming upstream POSTs.
+#
+# Why this exists: Bedrock invoke-with-response-stream occasionally accepts a
+# request but never returns response headers. The default httpx read timeout
+# (600s) governs that wait, so one hung attempt wedges the request for 10
+# minutes before router-level retries fire — three router attempts wedge the
+# caller for 30 minutes. Healthy header latency on this route is 1-3s
+# (pathological-but-successful worst case observed: ~148s), so a 240s budget
+# fails hung attempts fast while leaving genuine prefill latency untouched.
+#
+# Scope: this bounds ONLY the await of the streaming POST itself, which
+# returns once response headers arrive (httpx stream=True semantics).
+# Mid-stream chunk gaps keep the plain httpx read timeout. Non-streaming
+# POSTs wait for the full body and are intentionally NOT bounded here.
+#
+# Operational rollback: set the env to 0 (or negative) to restore the legacy
+# plain-await behavior without a code rollback.
+KOLLAB_ANTHROPIC_HEADERS_TIMEOUT_ENV = (
+    "KOLLAB_LITELLM_ANTHROPIC_HEADERS_TIMEOUT_SECONDS"
+)
+DEFAULT_ANTHROPIC_HEADERS_TIMEOUT_SECONDS = 240.0
+
+
+def _anthropic_messages_headers_timeout_seconds() -> float:
+    """Resolve the pre-headers budget; invalid values fall back to the default.
+
+    Read per call (not at import) so tests can monkeypatch the env and so a
+    container restarted with a new value picks it up without code changes.
+    """
+    raw = os.getenv(KOLLAB_ANTHROPIC_HEADERS_TIMEOUT_ENV, "")
+    if not raw.strip():
+        return DEFAULT_ANTHROPIC_HEADERS_TIMEOUT_SECONDS
+    try:
+        return float(raw)
+    except ValueError:
+        verbose_logger.warning(
+            "Invalid %s=%r; using default %.0fs",
+            KOLLAB_ANTHROPIC_HEADERS_TIMEOUT_ENV,
+            raw,
+            DEFAULT_ANTHROPIC_HEADERS_TIMEOUT_SECONDS,
+        )
+        return DEFAULT_ANTHROPIC_HEADERS_TIMEOUT_SECONDS
+
+
 class BaseLLMHTTPHandler:
+    @staticmethod
+    def _is_minimax_anthropic_messages_route(
+        custom_llm_provider: Optional[str], api_base: Optional[str]
+    ) -> bool:
+        if custom_llm_provider == litellm.LlmProviders.MINIMAX.value:
+            return True
+
+        if not isinstance(api_base, str):
+            return False
+
+        normalized_api_base = api_base.lower()
+        return (
+            "api.minimax.io/anthropic" in normalized_api_base
+            or "api.minimaxi.com/anthropic" in normalized_api_base
+        )
+
+    def _filter_unsupported_minimax_anthropic_messages_params(
+        self,
+        model: str,
+        anthropic_messages_provider_config: BaseAnthropicMessagesConfig,
+        anthropic_messages_optional_request_params: Dict,
+        custom_llm_provider: str,
+        api_base: Optional[str],
+        litellm_params: GenericLiteLLMParams,
+    ) -> Dict:
+        """
+        Filter unsupported MiniMax Anthropic `/v1/messages` params.
+
+        MiniMax's Anthropic-compatible endpoint rejects structured output params
+        like `output_config`, but native `/v1/messages` routes bypass the normal
+        OpenAI param filtering helpers. Keep this scoped to MiniMax to avoid
+        changing behavior for unrelated Anthropic-compatible providers.
+        """
+        if not self._is_minimax_anthropic_messages_route(
+            custom_llm_provider=custom_llm_provider, api_base=api_base
+        ):
+            return anthropic_messages_optional_request_params
+
+        supported_params = (
+            anthropic_messages_provider_config.get_supported_anthropic_messages_params(
+                model=model
+            )
+        )
+        unsupported_params = {
+            key: value
+            for key, value in anthropic_messages_optional_request_params.items()
+            if key not in supported_params
+        }
+
+        if not unsupported_params:
+            return anthropic_messages_optional_request_params
+
+        drop_params = litellm_params.get("drop_params")
+        if litellm.drop_params is True or drop_params is True:
+            for key in unsupported_params:
+                anthropic_messages_optional_request_params.pop(key, None)
+            return anthropic_messages_optional_request_params
+
+        raise litellm.UnsupportedParamsError(
+            message=(
+                f"{custom_llm_provider} does not support parameters: "
+                f"{list(unsupported_params.keys())}, for model={model}. "
+                "To drop these, set `litellm.drop_params=True` or for proxy:\n\n"
+                "`litellm_settings:\n drop_params: true`\n"
+            ),
+            llm_provider=custom_llm_provider,
+            model=model,
+        )
+
     async def _make_common_async_call(
         self,
         async_httpx_client: AsyncHTTPHandler,
@@ -1835,12 +1960,57 @@ class BaseLLMHTTPHandler:
             ProviderSpecificHeaderUtils,
         )
 
+        handler_started_at = latency_now()
+        request_shape_data = {
+            "model": model,
+            "messages": messages,
+            "tools": anthropic_messages_optional_request_params.get("tools"),
+            "system": anthropic_messages_optional_request_params.get("system"),
+            "stream": stream,
+            "max_tokens": anthropic_messages_optional_request_params.get("max_tokens"),
+            "metadata": anthropic_messages_optional_request_params.get("metadata"),
+            "thinking": anthropic_messages_optional_request_params.get("thinking"),
+        }
+        log_latency_stage(
+            "http_handler_start",
+            started_at=handler_started_at,
+            data=request_shape_data,
+            logging_obj=logging_obj,
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={
+                "provider_config": anthropic_messages_provider_config.__class__.__name__
+            },
+        )
+
         if client is None or not isinstance(client, AsyncHTTPHandler):
             async_httpx_client = get_async_httpx_client(
                 llm_provider=litellm.LlmProviders.ANTHROPIC
             )
         else:
             async_httpx_client = client
+        log_latency_stage(
+            "http_client_ready",
+            started_at=handler_started_at,
+            data=request_shape_data,
+            logging_obj=logging_obj,
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={"client_type": type(async_httpx_client).__name__},
+        )
+
+        anthropic_messages_optional_request_params = (
+            self._filter_unsupported_minimax_anthropic_messages_params(
+                model=model,
+                anthropic_messages_provider_config=anthropic_messages_provider_config,
+                anthropic_messages_optional_request_params=anthropic_messages_optional_request_params,
+                custom_llm_provider=custom_llm_provider,
+                api_base=api_base,
+                litellm_params=litellm_params,
+            )
+        )
 
         # Prepare headers
         kwargs = kwargs or {}
@@ -1876,6 +2046,19 @@ class BaseLLMHTTPHandler:
             litellm_params=dict(litellm_params),
             api_key=api_key,
             api_base=api_base,
+        )
+        log_latency_stage(
+            "anthropic_env_validated",
+            started_at=handler_started_at,
+            data=request_shape_data,
+            logging_obj=logging_obj,
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={
+                "header_count": len(headers or {}),
+                "has_api_base": bool(api_base),
+            },
         )
 
         headers = update_headers_with_filtered_beta(
@@ -1916,6 +2099,16 @@ class BaseLLMHTTPHandler:
             litellm_params=litellm_params,
             headers=headers,
         )
+        log_latency_stage(
+            "anthropic_request_transformed",
+            started_at=handler_started_at,
+            data=request_body,
+            logging_obj=logging_obj,
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={"request_body_key_count": len(request_body)},
+        )
         logging_obj.stream = stream
         logging_obj.model_call_details.update(request_body)
 
@@ -1930,6 +2123,20 @@ class BaseLLMHTTPHandler:
             litellm_params=dict(litellm_params),
             stream=stream,
         )
+        parsed_request_url = urlparse(str(request_url))
+        log_latency_stage(
+            "anthropic_url_built",
+            started_at=handler_started_at,
+            data=request_body,
+            logging_obj=logging_obj,
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={
+                "url_host": parsed_request_url.netloc,
+                "url_path": parsed_request_url.path,
+            },
+        )
 
         headers, signed_json_body = anthropic_messages_provider_config.sign_request(
             headers=headers,
@@ -1943,6 +2150,19 @@ class BaseLLMHTTPHandler:
             fake_stream=False,
             model=model,
         )
+        log_latency_stage(
+            "anthropic_request_signed",
+            started_at=handler_started_at,
+            data=request_body,
+            logging_obj=logging_obj,
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={
+                "signed_body_bytes": len(signed_json_body or b""),
+                "header_count": len(headers or {}),
+            },
+        )
 
         logging_obj.pre_call(
             input=[{"role": "user", "content": json.dumps(request_body)}],
@@ -1954,18 +2174,193 @@ class BaseLLMHTTPHandler:
             },
         )
 
-        try:
-            response = await async_httpx_client.post(
-                url=request_url,
-                headers=headers,
-                data=signed_json_body or json.dumps(request_body),
-                stream=stream or False,
-                logging_obj=logging_obj,
-            )
-            response.raise_for_status()
-        except Exception as e:
+        max_anthropic_messages_http_attempts = max(
+            anthropic_messages_provider_config.max_retry_on_anthropic_messages_http_error,
+            1,
+        )
+        # Resolved once per request so every attempt logs the same budget.
+        headers_timeout = _anthropic_messages_headers_timeout_seconds()
+        response: Optional[httpx.Response] = None
+        litellm_params_dict = dict(litellm_params)
+        for attempt_idx in range(max_anthropic_messages_http_attempts):
+            try:
+                upstream_post_started_at = latency_now()
+                log_latency_stage(
+                    "upstream_post_start",
+                    started_at=upstream_post_started_at,
+                    data=request_body,
+                    logging_obj=logging_obj,
+                    route_type="anthropic_messages",
+                    model=model,
+                    provider=custom_llm_provider,
+                    details={
+                        "attempt": attempt_idx + 1,
+                        "max_attempts": max_anthropic_messages_http_attempts,
+                        "stream": bool(stream),
+                    },
+                )
+                # For streaming requests the POST resolves as soon as response
+                # headers arrive, so bounding it bounds exactly the pre-headers
+                # phase: zero response bytes exist yet and nothing has been
+                # forwarded to the caller. Non-streaming POSTs resolve only
+                # after the full body, so a long legitimate completion would be
+                # falsely killed — they keep the plain await.
+                post_coro = async_httpx_client.post(
+                    url=request_url,
+                    headers=headers,
+                    data=signed_json_body or json.dumps(request_body),
+                    stream=stream or False,
+                    logging_obj=logging_obj,
+                )
+                if stream and headers_timeout > 0:
+                    response = await asyncio.wait_for(
+                        post_coro, timeout=headers_timeout
+                    )
+                else:
+                    response = await post_coro
+                log_latency_stage(
+                    "upstream_headers_received",
+                    started_at=upstream_post_started_at,
+                    data=request_body,
+                    logging_obj=logging_obj,
+                    route_type="anthropic_messages",
+                    model=model,
+                    provider=custom_llm_provider,
+                    details={
+                        "attempt": attempt_idx + 1,
+                        "status_code": response.status_code,
+                    },
+                )
+                response.raise_for_status()
+                log_latency_stage(
+                    "upstream_status_validated",
+                    started_at=upstream_post_started_at,
+                    data=request_body,
+                    logging_obj=logging_obj,
+                    route_type="anthropic_messages",
+                    model=model,
+                    provider=custom_llm_provider,
+                    details={"attempt": attempt_idx + 1},
+                )
+            except httpx.HTTPStatusError as e:
+                # Stop before native Anthropic adapter retries or request rewrites.
+                from litellm.litellm_core_utils.upstream_refusal import mapped_refusal
+
+                await e.response.aread()
+                terminal = mapped_refusal(e, model, custom_llm_provider)
+                if terminal is not None:
+                    raise terminal
+                hit_max_attempt = (
+                    attempt_idx + 1 == max_anthropic_messages_http_attempts
+                )
+                should_retry = anthropic_messages_provider_config.should_retry_anthropic_messages_on_http_error(
+                    e=e, litellm_params=litellm_params_dict
+                )
+                if should_retry and not hit_max_attempt:
+                    verbose_logger.debug(
+                        "Retrying on HTTPStatusError (attempt %s/%s).",
+                        attempt_idx + 2,
+                        max_anthropic_messages_http_attempts,
+                    )
+               
+                    request_body = anthropic_messages_provider_config.transform_anthropic_messages_request_on_http_error(
+                        e=e, request_data=request_body
+                    )
+                    headers, signed_json_body = (
+                        anthropic_messages_provider_config.sign_request(
+                            headers=headers,
+                            optional_params=dict(litellm_params),
+                            request_data=request_body,
+                            api_base=request_url,
+                            api_key=api_key,
+                            stream=stream,
+                            fake_stream=False,
+                            model=model,
+                        )
+                    )
+                    logging_obj.model_call_details.update(request_body)
+                    continue
+                raise self._handle_error(
+                    e=e, provider_config=anthropic_messages_provider_config
+                )
+            except (asyncio.TimeoutError, litellm.Timeout, httpx.TimeoutException) as e:
+                # Pre-headers stall (the observed Bedrock accept-then-silence
+                # hang). asyncio.TimeoutError comes from the headers budget
+                # above; litellm.Timeout is AsyncHTTPHandler.post's conversion
+                # of httpx timeouts. In both cases no response bytes exist and
+                # the stream iterator has not been created, so a retry is
+                # invisible to the caller. Retrying is restricted to streaming
+                # requests: a non-streaming POST that timed out may have spent
+                # the budget generating a full body, and replaying it doubles
+                # cost for a request the legacy path always failed anyway.
+                hit_max_attempt = (
+                    attempt_idx + 1 == max_anthropic_messages_http_attempts
+                )
+                will_retry = bool(stream) and not hit_max_attempt
+                log_latency_stage(
+                    "upstream_headers_timeout",
+                    started_at=upstream_post_started_at,
+                    data=request_body,
+                    logging_obj=logging_obj,
+                    route_type="anthropic_messages",
+                    model=model,
+                    provider=custom_llm_provider,
+                    details={
+                        "attempt": attempt_idx + 1,
+                        "max_attempts": max_anthropic_messages_http_attempts,
+                        "headers_timeout_s": headers_timeout,
+                        "error": type(e).__name__,
+                        "will_retry": will_retry,
+                    },
+                )
+                if will_retry:
+                    # Re-sign before retrying: SigV4 signatures embed the
+                    # signing timestamp, and a stalled attempt consumes most
+                    # of the headers budget — close enough to AWS's 5-minute
+                    # clock-skew window that reusing the old signature risks
+                    # an auth rejection on the retry.
+                    headers, signed_json_body = (
+                        anthropic_messages_provider_config.sign_request(
+                            headers=headers,
+                            optional_params=dict(litellm_params),
+                            request_data=request_body,
+                            api_base=request_url,
+                            api_key=api_key,
+                            stream=stream,
+                            fake_stream=False,
+                            model=model,
+                        )
+                    )
+                    continue
+                timeout_exc: Exception = e
+                if isinstance(e, asyncio.TimeoutError):
+                    # Surface the same exception class the legacy read-timeout
+                    # path produced so router retry/error semantics upstream
+                    # of this handler stay identical.
+                    timeout_exc = litellm.Timeout(
+                        message=(
+                            "Upstream returned no response headers within "
+                            f"{headers_timeout}s (pre-stream, attempt "
+                            f"{attempt_idx + 1}/"
+                            f"{max_anthropic_messages_http_attempts})."
+                        ),
+                        model=model,
+                        llm_provider=custom_llm_provider,
+                    )
+                raise self._handle_error(
+                    e=timeout_exc,
+                    provider_config=anthropic_messages_provider_config,
+                )
+            except Exception as e:
+                raise self._handle_error(
+                    e=e, provider_config=anthropic_messages_provider_config
+                )
+            break
+
+        if response is None:
             raise self._handle_error(
-                e=e, provider_config=anthropic_messages_provider_config
+                e=ValueError("No response from Anthropic /v1/messages"),
+                provider_config=anthropic_messages_provider_config,
             )
 
         # used for logging + cost tracking
@@ -1980,11 +2375,31 @@ class BaseLLMHTTPHandler:
                 litellm_logging_obj=logging_obj,
             )
             initial_response = completion_stream
+            log_latency_stage(
+                "stream_iterator_created",
+                started_at=handler_started_at,
+                data=request_body,
+                logging_obj=logging_obj,
+                route_type="anthropic_messages",
+                model=model,
+                provider=custom_llm_provider,
+                details={"stream_iterator_type": type(completion_stream).__name__},
+            )
         else:
             initial_response = anthropic_messages_provider_config.transform_anthropic_messages_response(
                 model=model,
                 raw_response=response,
                 logging_obj=logging_obj,
+            )
+            log_latency_stage(
+                "anthropic_response_transformed",
+                started_at=handler_started_at,
+                data=request_body,
+                logging_obj=logging_obj,
+                route_type="anthropic_messages",
+                model=model,
+                provider=custom_llm_provider,
+                details={"response_type": type(initial_response).__name__},
             )
 
         # Call agentic completion hooks
@@ -1998,6 +2413,20 @@ class BaseLLMHTTPHandler:
             stream=stream or False,
             custom_llm_provider=custom_llm_provider,
             kwargs=kwargs,
+        )
+        log_latency_stage(
+            "agentic_hooks_complete",
+            started_at=handler_started_at,
+            data=request_body,
+            logging_obj=logging_obj,
+            route_type="anthropic_messages",
+            model=model,
+            provider=custom_llm_provider,
+            details={
+                "final_response_type": type(final_response).__name__
+                if final_response is not None
+                else "",
+            },
         )
 
         return final_response if final_response is not None else initial_response
@@ -4788,12 +5217,12 @@ class BaseLLMHTTPHandler:
 
         except websockets.exceptions.InvalidStatusCode as e:  # type: ignore
             verbose_logger.exception(f"Error connecting to backend: {e}")
-            await websocket.close(code=e.status_code, reason=str(e))
+            await websocket.close(code=e.status_code, reason=_redact_string(str(e)))
         except Exception as e:
             verbose_logger.exception(f"Error connecting to backend: {e}")
             try:
                 await websocket.close(
-                    code=1011, reason=f"Internal server error: {str(e)}"
+                    code=1011, reason=_redact_string(f"Internal server error: {str(e)}")
                 )
             except RuntimeError as close_error:
                 if "already completed" in str(close_error) or "websocket.close" in str(
@@ -5065,12 +5494,12 @@ class BaseLLMHTTPHandler:
 
         except websockets.exceptions.InvalidStatusCode as e:  # type: ignore
             verbose_logger.exception(f"Error connecting to responses WS backend: {e}")
-            await websocket.close(code=e.status_code, reason=str(e))
+            await websocket.close(code=e.status_code, reason=_redact_string(str(e)))
         except Exception as e:
             verbose_logger.exception(f"Error in responses WS: {e}")
             try:
                 await websocket.close(
-                    code=1011, reason=f"Internal server error: {str(e)}"
+                    code=1011, reason=_redact_string(f"Internal server error: {str(e)}")
                 )
             except RuntimeError as close_error:
                 if "already completed" in str(close_error) or "websocket.close" in str(
@@ -5575,6 +6004,25 @@ class BaseLLMHTTPHandler:
                 api_key=api_key,
             )
 
+        if custom_llm_provider == "wokey":
+            from litellm.llms.kie.health_check import health_check_context
+            from litellm.llms.wokey.health_check import check_catalog
+
+            if health_check_context.get():
+                # Media health checks are free GETs, not background paid submissions.
+                return check_catalog(
+                    api_key or litellm_params.get("api_key"), model,
+                    litellm_params.get("api_base"), video=True
+                )
+
+        if custom_llm_provider == "kie":
+            from litellm.llms.kie.health_check import check_credit, health_check_context
+
+            if health_check_context.get():
+                return check_credit(
+                    api_key or litellm_params.get("api_key"), model, video=True
+                )
+
         if client is None or not isinstance(client, HTTPHandler):
             sync_httpx_client = _get_httpx_client(
                 params={"ssl_verify": litellm_params.get("ssl_verify", None)}
@@ -5645,6 +6093,11 @@ class BaseLLMHTTPHandler:
                 )
 
         except Exception as e:
+            if custom_llm_provider == "wokey" and isinstance(e, (httpx.TransportError, asyncio.TimeoutError, litellm.Timeout, litellm.APIConnectionError)):
+                # A lost POST response may hide an accepted/reserved job; never generate on Kie.
+                from litellm.llms.wokey.common import uncertain_submission
+
+                raise uncertain_submission() from None
             raise self._handle_error(
                 e=e,
                 provider_config=video_generation_provider_config,
@@ -5679,6 +6132,25 @@ class BaseLLMHTTPHandler:
         Async version of the video generation handler.
         Uses async HTTP client to make requests.
         """
+        if custom_llm_provider == "wokey":
+            from litellm.llms.kie.health_check import health_check_context
+            from litellm.llms.wokey.health_check import acheck_catalog
+
+            if health_check_context.get():
+                # Media health checks are free GETs, not background paid submissions.
+                return await acheck_catalog(
+                    api_key or litellm_params.get("api_key"), model,
+                    litellm_params.get("api_base"), video=True
+                )
+
+        if custom_llm_provider == "kie":
+            from litellm.llms.kie.health_check import acheck_credit, health_check_context
+
+            if health_check_context.get():
+                return await acheck_credit(
+                    api_key or litellm_params.get("api_key"), model, video=True
+                )
+
         if client is None or not isinstance(client, AsyncHTTPHandler):
             async_httpx_client = get_async_httpx_client(
                 llm_provider=litellm.LlmProviders(custom_llm_provider),
@@ -5747,6 +6219,11 @@ class BaseLLMHTTPHandler:
                 )
 
         except Exception as e:
+            if custom_llm_provider == "wokey" and isinstance(e, (httpx.TransportError, asyncio.TimeoutError, litellm.Timeout, litellm.APIConnectionError)):
+                # A lost POST response may hide an accepted/reserved job; never generate on Kie.
+                from litellm.llms.wokey.common import uncertain_submission
+
+                raise uncertain_submission() from None
             raise self._handle_error(
                 e=e,
                 provider_config=video_generation_provider_config,

@@ -163,6 +163,24 @@ class _ProxyDBLogger(CustomLogger):
                 sl_object.get("request_tags", None) if sl_object is not None else None
             )
 
+            # Streaming requests should only be billed once the final assembled
+            # response has been logged. Placeholder success events without a
+            # standard logging payload can otherwise leak zero-token spend rows
+            # keyed by `litellm_call_id` before the real completed response lands.
+            if (
+                kwargs.get("stream") is True
+                and sl_object is None
+                and "complete_streaming_response" not in kwargs
+                and "async_complete_streaming_response" not in kwargs
+            ):
+                verbose_proxy_logger.debug(
+                    "Cost tracking - skipping incomplete streaming success event for call_type=%s model=%s litellm_call_id=%s",
+                    kwargs.get("call_type", "unknown"),
+                    kwargs.get("model"),
+                    kwargs.get("litellm_call_id"),
+                )
+                return
+
             if response_cost is not None:
                 user_api_key = metadata.get("user_api_key", None)
                 if kwargs.get("cache_hit", False) is True:

@@ -2,6 +2,7 @@ from enum import Enum
 from typing import Any, Dict, List, Literal, Optional, Union
 
 from typing_extensions import (
+    NotRequired,
     Required,
     TypedDict,
 )
@@ -10,6 +11,7 @@ from typing_extensions import (
 class FunctionResponse(TypedDict):
     name: str
     response: Optional[dict]
+    parts: NotRequired[List["PartType"]]
 
 
 class FunctionCall(TypedDict):

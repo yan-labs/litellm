@@ -36,7 +36,7 @@ from litellm import (
     log_raw_request_response,
     turn_off_message_logging,
 )
-from litellm._logging import _is_debugging_on, verbose_logger
+from litellm._logging import _is_debugging_on, _redact_string, verbose_logger
 from litellm._uuid import uuid
 from litellm.batches.batch_utils import _handle_completed_batch
 from litellm.caching.caching import DualCache, InMemoryCache
@@ -521,10 +521,18 @@ class Logging(LiteLLMLoggingBaseClass):
     def get_router_model_id(self) -> Optional[str]:
         """Extract the router deployment model_id from litellm_params.
 
-        Checks both litellm_metadata and metadata for model_info.id.
-        Used by cost calculators to look up custom pricing registered
-        under the deployment's model_info.id in litellm.model_cost.
+        A Router-bound request always resolves its private server-selected
+        deployment before ordinary metadata because provider adapters can
+        reintroduce request-controlled metadata while refreshing the logger.
+        Calls without a Router binding retain the legacy metadata fallbacks.
         """
+        trusted_router_model_info = getattr(
+            self, "_router_selected_model_info", None
+        )
+        if isinstance(trusted_router_model_info, dict):
+            trusted_model_id = trusted_router_model_info.get("id")
+            if trusted_model_id is not None:
+                return trusted_model_id
         if not hasattr(self, "litellm_params"):
             return None
         for key in ("litellm_metadata", "metadata"):
@@ -533,7 +541,37 @@ class Logging(LiteLLMLoggingBaseClass):
             model_id = info.get("id")
             if model_id is not None:
                 return model_id
+        model_info = self.litellm_params.get("model_info", {}) or {}
+        model_id = model_info.get("id")
+        if model_id is not None:
+            return model_id
         return None
+
+    def bind_router_model_info(self, model_info: Dict[str, Any]) -> None:
+        """Bind the server-selected Router deployment to this request logger.
+
+        Router calls this after choosing a deployment so later provider
+        adapters can refresh ordinary logging parameters without erasing the
+        deployment ID and custom prices used by streaming cost callbacks. The
+        value is request-local trusted state and must never be populated from
+        request metadata.
+        """
+        self._router_selected_model_info = dict(model_info)
+        if hasattr(self, "litellm_params"):
+            self.litellm_params["model_info"] = dict(model_info)
+
+    def get_bound_router_model_info(self) -> Optional[Dict[str, Any]]:
+        """Return a copy of the server-selected deployment pricing, if bound.
+
+        Cost handlers use this request-local value when a worker's global
+        model registry does not contain a DB-backed deployment. Returning only
+        the private Router binding keeps request metadata from becoming a
+        pricing authority.
+        """
+        model_info = getattr(self, "_router_selected_model_info", None)
+        if not isinstance(model_info, dict):
+            return None
+        return dict(model_info)
 
     def update_environment_variables(
         self,
@@ -597,9 +635,12 @@ class Logging(LiteLLMLoggingBaseClass):
         **additional_params,
     ):
         """
-        Convenience wrapper around update_environment_variables that
-        automatically extracts metadata/litellm_metadata from kwargs,
-        so callers don't need to manually plumb them into litellm_params.
+        Refresh logging parameters while preserving trusted Router selection.
+
+        Provider adapters call this as requests move from proxy routing into
+        provider-specific HTTP handling. Ordinary metadata may be reshaped at
+        those boundaries, but a Router-bound deployment must remain attached
+        so streaming callbacks calculate cost from the server-selected route.
         """
         base_litellm_params: Dict[str, Any] = {}
 
@@ -614,6 +655,12 @@ class Logging(LiteLLMLoggingBaseClass):
 
         if litellm_params:
             base_litellm_params.update(litellm_params)
+
+        trusted_router_model_info = getattr(
+            self, "_router_selected_model_info", None
+        )
+        if isinstance(trusted_router_model_info, dict):
+            base_litellm_params["model_info"] = dict(trusted_router_model_info)
 
         self.update_environment_variables(
             litellm_params=base_litellm_params,
@@ -2838,7 +2885,11 @@ class Logging(LiteLLMLoggingBaseClass):
 
         self.model_call_details["log_event_type"] = "failed_api_call"
         self.model_call_details["exception"] = exception
-        self.model_call_details["traceback_exception"] = traceback_exception
+        self.model_call_details["traceback_exception"] = (
+            _redact_string(traceback_exception)
+            if isinstance(traceback_exception, str)
+            else traceback_exception
+        )
         self.model_call_details["end_time"] = end_time
         self.model_call_details.setdefault("original_response", None)
         self.model_call_details["response_cost"] = 0
@@ -2861,7 +2912,7 @@ class Logging(LiteLLMLoggingBaseClass):
             end_time=end_time,
             logging_obj=self,
             status="failure",
-            error_str=str(exception),
+            error_str=_redact_string(str(exception)),
             original_exception=exception,
             standard_built_in_tools_params=self.standard_built_in_tools_params,
         )
@@ -4561,17 +4612,19 @@ def use_custom_pricing_for_model(litellm_params: Optional[dict]) -> bool:
         if litellm_params.get(key) is not None:
             return True
 
-    # Check model_info from metadata or litellm_metadata (generic_api_call routes
-    # like /responses and /messages store model_info under litellm_metadata)
+    # Generic router adapters may retain the selected deployment either inside
+    # metadata or in the top-level model_info field. All shapes come from the
+    # Router's selected deployment and must activate its registered pricing.
+    model_info_candidates = [litellm_params.get("model_info", {}) or {}]
     for metadata_key in ("metadata", "litellm_metadata"):
         metadata: dict = litellm_params.get(metadata_key, {}) or {}
-        model_info: dict = metadata.get("model_info", {}) or {}
+        model_info_candidates.append(metadata.get("model_info", {}) or {})
 
-        if model_info:
-            matching_keys = _CUSTOM_PRICING_KEYS & model_info.keys()
-            for key in matching_keys:
-                if model_info.get(key) is not None:
-                    return True
+    for model_info in model_info_candidates:
+        matching_keys = _CUSTOM_PRICING_KEYS & model_info.keys()
+        for key in matching_keys:
+            if model_info.get(key) is not None:
+                return True
 
     return False
 

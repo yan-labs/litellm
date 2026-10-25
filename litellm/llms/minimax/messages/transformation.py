@@ -27,6 +27,44 @@ class MinimaxMessagesConfig(AnthropicMessagesConfig):
     def custom_llm_provider(self) -> Optional[str]:
         return "minimax"
 
+    def get_supported_anthropic_messages_params(self, model: str) -> list:
+        """
+        MiniMax's Anthropic-compatible endpoint does not support structured output
+        parameters like ``output_format`` / ``output_config``.
+
+        Keeping these out of the supported list lets ``drop_params=True`` remove
+        them before LiteLLM sends the upstream request.
+
+        Why ``stream`` is added explicitly here:
+        Base ``AnthropicMessagesConfig`` does NOT include ``stream`` in its
+        supported list — Anthropic's own endpoint accepts ``stream`` via header
+        / query negotiation, so the body field is not strictly required there.
+        MiniMax's Anthropic-compatible endpoint at ``/anthropic/v1/messages``
+        is stricter: it only enables SSE streaming when ``"stream": true`` is
+        present in the request **body**. Without this override the
+        MiniMax-only ``_filter_unsupported_minimax_anthropic_messages_params``
+        path (with ``drop_params=true``) silently drops ``stream`` from the
+        request body, so MiniMax responds with a single JSON blob even when
+        the caller requested ``stream=true``. LiteLLM then wraps that blob
+        as a single SSE chunk, producing a ``Content-Type: text/event-stream``
+        response with zero ``event:``/``data:`` frames — which breaks every
+        Anthropic SDK client downstream (Kollab AgentCore included).
+        Adding ``"stream"`` to the supported list keeps the field in the
+        outgoing body and restores native MiniMax SSE streaming.
+        """
+        unsupported_params = {"output_format", "output_config"}
+        supported = [
+            param
+            for param in super().get_supported_anthropic_messages_params(model=model)
+            if param not in unsupported_params
+        ]
+        # Append rather than rely on parent — base class deliberately omits
+        # ``stream``; MiniMax requires it in body. Idempotent against future
+        # base-class changes that might add it.
+        if "stream" not in supported:
+            supported.append("stream")
+        return supported
+
     @staticmethod
     def get_api_key(api_key: Optional[str] = None) -> Optional[str]:
         """

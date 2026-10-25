@@ -1,0 +1,25 @@
+## LiteLLM Tokyo overlay Dockerfile（test / prod 共用）
+##
+## 这个 Dockerfile 是 deploy-tokyo.yml workflow 的「build-and-restart」模式构建源。
+## 它把仓库当前 worktree 的 litellm/ 源码覆盖到一个干净的上游 base image 上，
+## 输出可以直接 docker run 的镜像。
+##
+## 之前 EC2 上 /opt/litellm-test-overlay-build/Dockerfile 是手动维护的同样内容；
+## 把它纳入 git 之后，workflow 直接用仓库里这份，避免 EC2 上和仓库出现版本漂移。
+##
+## Build context: 仓库根目录 apps/litellm/
+##   docker build -f deploy/Dockerfile.overlay -t <tag> .
+##
+## Base image：litellm-openrouter-fix:20260326 必须**预先**存在于 build host
+## 的 docker daemon。我们不在 ECR 上 push 它，节省镜像仓库流量；EC2 上首次
+## 部署时已经手动 build 过，self-hosted runner 共用同一份 docker daemon。
+FROM litellm-openrouter-fix:20260326
+
+## /app/litellm 是 proxy 启动入口的 import 路径（cwd），必须先覆盖。
+COPY litellm /app/litellm
+
+## 同时覆盖 site-packages 里的安装副本：proxy 在某些路径会按 sys.path 解析，
+## 优先命中 site-packages 里的 .py 而不是 cwd 的 .py，所以两边都要打到。
+## 这里不再像旧版 Dockerfile 那样逐文件 COPY —— fork 改动文件已超过 30 个，
+## 整目录 merge 更稳；目标目录里没在源里的文件不会被删除（COPY 是合并语义）。
+COPY litellm/ /usr/lib/python3.13/site-packages/litellm/

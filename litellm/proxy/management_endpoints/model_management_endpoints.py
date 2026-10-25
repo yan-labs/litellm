@@ -58,6 +58,29 @@ from litellm.utils import get_utc_datetime
 router = APIRouter()
 
 
+def _is_empty_vector_store_ids(value: object) -> bool:
+    return isinstance(value, list) and len(value) == 0
+
+
+_CREDENTIAL_MANAGED_LITELLM_PARAMS = {
+    "api_key",
+    "aws_access_key_id",
+    "aws_secret_access_key",
+    "aws_session_token",
+    "aws_web_identity_token",
+    "aws_region_name",
+}
+
+
+def _remove_stale_direct_credential_params(
+    existing_params: dict, updated_params: dict
+) -> None:
+    if updated_params.get("litellm_credential_name"):
+        for key in _CREDENTIAL_MANAGED_LITELLM_PARAMS:
+            if key not in updated_params:
+                existing_params.pop(key, None)
+
+
 class UpdatePublicModelGroupsRequest(BaseModel):
     """Request model for updating public model groups"""
 
@@ -101,12 +124,25 @@ def update_db_model(
 
     # update litellm params
     if updated_patch.litellm_params:
+        updated_litellm_params = updated_patch.litellm_params.model_dump(
+            exclude_none=True
+        )
+        remove_vector_store_ids = _is_empty_vector_store_ids(
+            updated_litellm_params.get("vector_store_ids")
+        )
+        if remove_vector_store_ids:
+            updated_litellm_params.pop("vector_store_ids", None)
+            merged_deployment_dict["litellm_params"].pop("vector_store_ids", None)  # type: ignore
+
+        _remove_stale_direct_credential_params(
+            existing_params=merged_deployment_dict["litellm_params"],  # type: ignore
+            updated_params=updated_litellm_params,
+        )
+
         # Encrypt any sensitive values
         encrypted_params = {
             k: encrypt_value_helper(v)
-            for k, v in updated_patch.litellm_params.model_dump(
-                exclude_none=True
-            ).items()
+            for k, v in updated_litellm_params.items()
         }
 
         merged_deployment_dict["litellm_params"].update(encrypted_params)  # type: ignore
@@ -1058,6 +1094,16 @@ async def update_model(
             _new_litellm_params_dict = model_params.litellm_params.dict(
                 exclude_none=True
             )
+            remove_vector_store_ids = _is_empty_vector_store_ids(
+                _new_litellm_params_dict.get("vector_store_ids")
+            )
+            if remove_vector_store_ids:
+                _new_litellm_params_dict.pop("vector_store_ids", None)
+
+            _remove_stale_direct_credential_params(
+                existing_params=_existing_litellm_params_dict,
+                updated_params=_new_litellm_params_dict,
+            )
 
             ### ENCRYPT PARAMS ###
             for k, v in _new_litellm_params_dict.items():
@@ -1067,6 +1113,8 @@ async def update_model(
             ### MERGE WITH EXISTING DATA ###
             merged_dictionary = {}
             _mp = model_params.litellm_params.dict()
+            if remove_vector_store_ids:
+                _mp.pop("vector_store_ids", None)
 
             for key, value in _mp.items():
                 if value is not None:
@@ -1078,6 +1126,9 @@ async def update_model(
                     merged_dictionary[key] = _existing_litellm_params_dict[key]
                 else:
                     pass
+
+            if remove_vector_store_ids:
+                merged_dictionary.pop("vector_store_ids", None)
 
             _data: dict = {
                 "litellm_params": json.dumps(merged_dictionary),  # type: ignore

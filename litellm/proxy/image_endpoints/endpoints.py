@@ -278,6 +278,11 @@ async def image_edit_api(
     # Read request body and convert UploadFiles to BytesIO
     #########################################################
     data = await _read_request_body(request=request)
+    # Multipart controls arrive as text; Router requires a real bool/int.
+    if data.get("disable_fallbacks") in ("true", "false"):
+        data["disable_fallbacks"] = data["disable_fallbacks"] == "true"
+    if isinstance(data.get("num_retries"), str) and data["num_retries"].isdecimal():
+        data["num_retries"] = int(data["num_retries"])
     image_files = await batch_to_bytesio(image)
     mask_files = await batch_to_bytesio(mask)
     if image_files:

@@ -1,3 +1,8 @@
+"""Authenticated Google endpoints used by the managed proxy/router.
+
+Interactions with a model alias use its server-owned provider and named
+credential; model-free AI Studio calls keep their existing behavior.
+"""
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -10,6 +15,14 @@ from litellm.proxy.auth.user_api_key_auth import UserAPIKeyAuth, user_api_key_au
 from litellm.proxy.common_request_processing import ProxyBaseLLMRequestProcessing
 from litellm.proxy.common_utils.http_parsing_utils import _read_request_body
 from litellm.types.llms.vertex_ai import TokenCountDetailsResponse
+
+def _interaction_provider(model, llm_router):
+    """Resolve the provider from a configured alias without accepting caller credentials."""
+    deployment = llm_router.get_deployment_by_model_group_name(model) if model and llm_router else None
+    if deployment:
+        return deployment.litellm_params.custom_llm_provider or deployment.litellm_params.model.split("/")[0]
+    return "gemini"
+
 
 router = APIRouter(
     tags=["google genai endpoints"],
@@ -279,7 +292,7 @@ async def create_interaction(
 
     # Default to gemini provider for interactions
     if "custom_llm_provider" not in data:
-        data["custom_llm_provider"] = "gemini"
+        data["custom_llm_provider"] = _interaction_provider(data.get("model"), llm_router)
 
     processor = ProxyBaseLLMRequestProcessing(data=data)
     try:
@@ -347,7 +360,12 @@ async def get_interaction(
         version,
     )
 
-    data = {"interaction_id": interaction_id, "custom_llm_provider": "gemini"}
+    # Polling must select the same managed deployment as submission so Vertex
+    # authentication stays inside the gateway, including named credentials.
+    model = request.query_params.get("model")
+    data = {"interaction_id": interaction_id, "custom_llm_provider": _interaction_provider(model, llm_router)}
+    if model:
+        data["model"] = model
 
     processor = ProxyBaseLLMRequestProcessing(data=data)
     try:
@@ -361,7 +379,7 @@ async def get_interaction(
             general_settings=general_settings,
             proxy_config=proxy_config,
             select_data_generator=select_data_generator,
-            model=None,
+            model=data.get("model"),
             user_model=user_model,
             user_temperature=user_temperature,
             user_request_timeout=user_request_timeout,

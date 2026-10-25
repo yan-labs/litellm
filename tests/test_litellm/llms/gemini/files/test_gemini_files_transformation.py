@@ -37,9 +37,12 @@ class TestGoogleAIStudioFilesTransformation:
             litellm_params=litellm_params,
         )
 
-        # Verify URL is constructed correctly with API key
-        assert "key=test-api-key" in url
-        assert file_id in url
+        # API key is passed via x-goog-api-key header, not in URL
+        assert (
+            url
+            == "https://generativelanguage.googleapis.com/v1beta/files/test123"
+        )
+        assert "key=" not in url
 
         # CRITICAL: params should be empty dict, not contain Content-Type or any other params
         # These would be incorrectly interpreted as query parameters
@@ -59,17 +62,42 @@ class TestGoogleAIStudioFilesTransformation:
             litellm_params=litellm_params,
         )
 
-        # Verify URL is constructed correctly
-        assert "generativelanguage.googleapis.com" in url
-        assert file_id in url
-        assert "key=test-api-key" in url
+        # API key is passed via x-goog-api-key header, not in URL
+        assert (
+            url
+            == "https://generativelanguage.googleapis.com/v1beta/files/test123"
+        )
+        assert "key=" not in url
 
         # CRITICAL: params should be empty dict
         assert params == {}, f"Expected empty params dict, got: {params}"
         assert "Content-Type" not in params, "Content-Type should not be in query params"
 
-    @patch.dict('os.environ', {}, clear=True)
-    @patch('litellm.llms.gemini.common_utils.get_secret_str', return_value=None)
+    def test_transform_retrieve_file_request_with_raw_id_only(self):
+        """
+        Regression guard: API key must NOT appear in the URL.
+
+        The key is sent via x-goog-api-key header to prevent leaking
+        credentials in httpx error tracebacks.
+        """
+        file_id = "cctqueckiggb"
+        litellm_params = {"api_key": "test-api-key"}
+
+        url, params = self.handler.transform_retrieve_file_request(
+            file_id=file_id,
+            optional_params={},
+            litellm_params=litellm_params,
+        )
+
+        assert (
+            url
+            == "https://generativelanguage.googleapis.com/v1beta/files/cctqueckiggb"
+        )
+        assert "key=" not in url
+        assert params == {}
+
+    @patch.dict("os.environ", {}, clear=True)
+    @patch("litellm.llms.gemini.common_utils.get_secret_str", return_value=None)
     def test_transform_retrieve_file_request_missing_api_key(self, mock_get_secret):
         """Test that transform_retrieve_file_request raises error when API key is missing"""
         file_id = "files/test123"
@@ -252,10 +280,10 @@ class TestGoogleAIStudioFilesTransformation:
             litellm_params={},
         )
 
-        # Verify URL structure
+        # Verify URL structure - API key must NOT be in URL
         assert api_base in url
         assert "upload/v1beta/files" in url
-        assert f"key={api_key}" in url
+        assert "key=" not in url
 
     def test_transform_delete_file_request_with_full_uri(self):
         """Test delete file request transformation with full URI"""

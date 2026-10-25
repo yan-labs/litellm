@@ -170,6 +170,51 @@ async def test_track_cost_callback_skips_when_no_standard_logging_object():
 
 
 @pytest.mark.asyncio
+async def test_track_cost_callback_skips_incomplete_streaming_success_event():
+    """
+    Streaming success callbacks should only write spend logs after the final
+    assembled response is available.
+
+    Regression test for zero-token placeholder rows where an incomplete
+    streaming callback carried `response_cost=0.0` but no
+    standard_logging_object / complete response marker yet.
+    """
+    logger = _ProxyDBLogger()
+
+    kwargs = {
+        "call_type": "anthropic_messages",
+        "model": "MiniMax-M2.7",
+        "litellm_call_id": "test-call-id",
+        "litellm_params": {
+            "metadata": {
+                "user_api_key": "test-api-key",
+                "user_api_key_user_id": "test-user",
+                "user_api_key_team_id": "test-team",
+            }
+        },
+        "stream": True,
+        "response_cost": 0.0,
+    }
+
+    with patch(
+        "litellm.proxy.proxy_server.proxy_logging_obj",
+    ) as mock_proxy_logging:
+        mock_proxy_logging.failed_tracking_alert = AsyncMock()
+        mock_proxy_logging.db_spend_update_writer = MagicMock()
+        mock_proxy_logging.db_spend_update_writer.update_database = AsyncMock()
+
+        await logger._PROXY_track_cost_callback(
+            kwargs=kwargs,
+            completion_response={"type": "message_start"},
+            start_time=datetime.now(),
+            end_time=datetime.now(),
+        )
+
+        mock_proxy_logging.db_spend_update_writer.update_database.assert_not_called()
+        mock_proxy_logging.failed_tracking_alert.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_async_post_call_failure_hook_propagates_trace_id_from_logging_obj():
     """
     When an LLM call fails, the proxy calls post_call_failure_hook with

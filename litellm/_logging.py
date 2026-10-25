@@ -45,11 +45,19 @@ def _build_secret_patterns() -> re.Pattern:
         r"x-ak-[A-Za-z0-9\-_]{20,}",
         # Google API keys
         r"AIza[0-9A-Za-z\-_]{35}",
-        # Password / secret params (handles key=value and 'key': 'value')
-        r"\w*(?:password|passwd|client_secret|secret_key|_secret)"
+        # Password / secret params (handles key=value and 'key': 'value').
+        # The `(?:^|(?<=\W))` anchor makes the leading `\w*` start only at the beginning
+        # of a word run. Without it the engine retried `\w*(?:password|...)` from every
+        # offset of a long word run (O(n^2)), and this regex runs synchronously on the
+        # event loop for every log record / failure string.
+        r"(?:^|(?<=\W))\w*(?:password|passwd|client_secret|secret_key|_secret)"
         r"['\"]?\s*[:=]\s*['\"]?[^\s,'\"})\]{}>]+",
-        # Database connection string credentials (scheme://user:pass@host)
-        r"(?<=://)[^\s'\"]*:[^\s'\"@]+(?=@)",
+        # Database connection string credentials (scheme://user:pass@host).
+        # Userinfo cannot contain ':' (the user/password delimiter), '/' or '@'; excluding
+        # them keeps the scan linear. A looser userinfo class such as `[^\s'\"]*` is
+        # O(n^3) on a quote/whitespace-free run containing many `://` tokens (e.g. URL
+        # lists joined by escaped newlines inside a JSON/repr string).
+        r"(?<=://)[^\s'\"/@:]*:[^\s'\"/@]+(?=@)",
         # Databricks personal access tokens
         r"dapi[0-9a-f]{32}",
         # ── Key-name-based redaction ──
@@ -71,6 +79,8 @@ _SECRET_RE = _build_secret_patterns()
 
 
 def _redact_string(value: str) -> str:
+    if not _ENABLE_SECRET_REDACTION:
+        return value
     return _SECRET_RE.sub(_REDACTED, value)
 
 

@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Operations Runbooks
+
+- Tokyo LiteLLM deployment method: `docs/litellm_tokyo_deployment.md`
+  - Use this runbook for the actual EC2 + Docker + RDS + Redis + Caddy + VPN deployment model used for the Tokyo LiteLLM environment, including update and rollback flow.
+- Tokyo LiteLLM alarm setup and maintenance: `docs/litellm_tokyo_alarm_management.md`
+  - Use this runbook for CloudWatch dashboards, SNS/email subscriptions, Feishu alarm forwarding, CWAgent metrics, and alarm add/update/delete operations for the deployed Tokyo LiteLLM instance.
+
 ## Development Commands
 
 ### Installation

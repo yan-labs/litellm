@@ -1,9 +1,17 @@
+"""LiteLLM route dispatch helpers.
+
+Kollab's latency tracing uses this module to identify time spent between
+proxy request normalization and the selected provider handler. The markers are
+structural only so they can be correlated with Gateway logs in TEST and prod.
+"""
+
 import asyncio
 from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from fastapi import HTTPException, status
 
 import litellm
+from litellm.proxy.kollab_latency_debug import latency_now, log_latency_stage
 
 if TYPE_CHECKING:
     from litellm.router import Router as _Router
@@ -318,10 +326,42 @@ async def route_request(  # noqa: PLR0915 - Complex routing function, refactorin
     """
     Common helper to route the request
     """
+    route_started_at = latency_now()
+    log_latency_stage(
+        "route_request_start",
+        started_at=route_started_at,
+        data=data,
+        route_type=route_type,
+    )
+    session_started_at = latency_now()
     await add_shared_session_to_data(data)
+    log_latency_stage(
+        "route_shared_session_ready",
+        started_at=session_started_at,
+        total_started_at=route_started_at,
+        data=data,
+        route_type=route_type,
+        details={
+            "has_shared_session": "shared_session" in data,
+            "has_router": llm_router is not None,
+        },
+    )
 
     team_id = get_team_id_from_data(data)
     router_model_names = llm_router.model_names if llm_router is not None else []
+    log_latency_stage(
+        "route_model_context_ready",
+        started_at=route_started_at,
+        total_started_at=route_started_at,
+        data=data,
+        route_type=route_type,
+        details={
+            "team_id_present": team_id is not None,
+            "router_model_count": len(router_model_names),
+            "has_user_config": "user_config" in data,
+            "has_router_settings_override": "router_settings_override" in data,
+        },
+    )
 
     # Preprocess Google GenAI generate content requests
     if route_type in ["agenerate_content", "agenerate_content_stream"]:

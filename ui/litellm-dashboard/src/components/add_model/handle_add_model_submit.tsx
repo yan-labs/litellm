@@ -68,6 +68,11 @@ export const prepareModelAddRequest = async (formValues: Record<string, any>, ac
           console.log("custom_llm_provider mappingResult:", mappingResult);
         } else if (key == "model") {
           continue;
+        } else if (key === "vector_store_ids") {
+          if (Array.isArray(value) && value.length > 0) {
+            litellmParamsObj[key] = value.filter(Boolean);
+          }
+          continue;
         }
         // Check if key is "base_model"
         else if (key === "base_model") {

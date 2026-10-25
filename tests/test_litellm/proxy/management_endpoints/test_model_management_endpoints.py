@@ -561,6 +561,60 @@ class TestUpdatePublicModelGroups:
 class TestTeamModelUpdate:
     """Test team model update handles team_id consistently with model creation"""
 
+    def test_update_db_model_removes_empty_vector_store_ids(self):
+        """Test empty vector_store_ids clears the stored model param instead of persisting []"""
+        from litellm.proxy.management_endpoints.model_management_endpoints import (
+            update_db_model,
+        )
+        from litellm.types.router import ModelInfo
+
+        db_model = Deployment(
+            model_name="bedrock-model",
+            litellm_params=LiteLLM_Params(
+                model="bedrock/model",
+                custom_llm_provider="bedrock",
+                vector_store_ids=["vs_existing"],
+            ),
+            model_info=ModelInfo(),
+        )
+        patch_data = updateDeployment(litellm_params={"vector_store_ids": []})
+
+        with patch.dict(os.environ, {"LITELLM_SALT_KEY": "test-salt-key"}):
+            result = update_db_model(db_model=db_model, updated_patch=patch_data)
+
+        updated_litellm_params = json.loads(result["litellm_params"])
+        assert "vector_store_ids" not in updated_litellm_params
+
+    def test_update_db_model_removes_stale_direct_credentials(self):
+        """Test switching to a stored credential clears old model-level secrets."""
+        from litellm.proxy.management_endpoints.model_management_endpoints import (
+            update_db_model,
+        )
+        from litellm.types.router import ModelInfo
+
+        db_model = Deployment(
+            model_name="bedrock-model",
+            litellm_params=LiteLLM_Params(
+                model="bedrock/model",
+                custom_llm_provider="bedrock",
+                api_key="old-direct-api-key",
+                aws_region_name="old-region",
+                litellm_credential_name=None,
+            ),
+            model_info=ModelInfo(),
+        )
+        patch_data = updateDeployment(
+            litellm_params={"litellm_credential_name": "bedrock-3"}
+        )
+
+        with patch.dict(os.environ, {"LITELLM_SALT_KEY": "test-salt-key"}):
+            result = update_db_model(db_model=db_model, updated_patch=patch_data)
+
+        updated_litellm_params = json.loads(result["litellm_params"])
+        assert "api_key" not in updated_litellm_params
+        assert "aws_region_name" not in updated_litellm_params
+        assert "litellm_credential_name" in updated_litellm_params
+
     @pytest.mark.asyncio
     async def test_patch_model_with_team_id_creates_proper_setup(self):
         """Test PATCH with team_id creates unique model name, alias, and team membership like POST does"""

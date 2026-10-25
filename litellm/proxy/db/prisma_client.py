@@ -215,15 +215,37 @@ class PrismaWrapper:
         return None
 
     async def recreate_prisma_client(
-        self, new_db_url: str, http_client: Optional[Any] = None
+        self,
+        new_db_url: str,
+        http_client: Optional[Any] = None,
+        disconnect_timeout_seconds: Optional[float] = None,
     ):
-        """Disconnect and reconnect the Prisma client with a new database URL."""
+        """Disconnect and reconnect the Prisma client with a new database URL.
+
+        ``disconnect_timeout_seconds`` is used by the query-engine self-heal path.
+        A dead engine can leave Prisma's ``disconnect()`` waiting indefinitely;
+        bounding that wait lets us replace the dead client instead of exhausting
+        the reconnect cycle's entire timeout budget.
+        """
         from prisma import Prisma  # type: ignore
 
         old_engine_pid = self._get_engine_pid()
 
         try:
-            await self._original_prisma.disconnect()
+            disconnect_coro = self._original_prisma.disconnect()
+            if disconnect_timeout_seconds is None:
+                await disconnect_coro
+            else:
+                await asyncio.wait_for(
+                    disconnect_coro,
+                    timeout=disconnect_timeout_seconds,
+                )
+        except asyncio.TimeoutError:
+            verbose_proxy_logger.warning(
+                "Timed out after %ss disconnecting Prisma client; replacing the client.",
+                disconnect_timeout_seconds,
+            )
+            await self._kill_engine_process(old_engine_pid)
         except Exception as e:
             verbose_proxy_logger.warning(f"Failed to disconnect Prisma client: {e}")
             await self._kill_engine_process(old_engine_pid)

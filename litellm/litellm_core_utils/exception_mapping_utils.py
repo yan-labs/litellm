@@ -1,3 +1,7 @@
+"""Provider error normalization for SDK callers and the managed gateway.
+
+Trusted refusal envelopes are retained before generic provider error mappings.
+"""
 import json
 import re
 import traceback
@@ -6,7 +10,7 @@ from typing import Any, Optional
 import httpx
 
 import litellm
-from litellm._logging import verbose_logger
+from litellm._logging import _redact_string, verbose_logger
 from litellm.types.utils import LlmProviders
 
 from ..exceptions import (
@@ -239,7 +243,12 @@ def exception_type(  # type: ignore  # noqa: PLR0915
     completion_kwargs={},
     extra_kwargs={},
 ):
-    """Maps an LLM Provider Exception to OpenAI Exception Format"""
+    """Map provider failures, preserving structured terminal refusal and real usage."""
+    from litellm.litellm_core_utils.upstream_refusal import mapped_refusal
+
+    terminal = mapped_refusal(original_exception, model, custom_llm_provider)
+    if terminal is not None:
+        return terminal
     if any(
         isinstance(original_exception, exc_type)
         for exc_type in litellm.LITELLM_EXCEPTION_TYPES
@@ -2304,7 +2313,7 @@ def exception_type(  # type: ignore  # noqa: PLR0915
                 else:
                     # if no status code then it is an APIConnectionError: https://github.com/openai/openai-python#handling-errors
                     raise APIConnectionError(
-                        message=f"{exception_provider} APIConnectionError - {message}\n{traceback.format_exc()}",
+                        message=f"{exception_provider} APIConnectionError - {message}\n{_redact_string(traceback.format_exc())}",
                         llm_provider="azure",
                         model=model,
                         litellm_debug_info=extra_information,
@@ -2431,7 +2440,7 @@ def exception_type(  # type: ignore  # noqa: PLR0915
             else:
                 raise APIConnectionError(
                     message="{}\n{}".format(
-                        str(original_exception), traceback.format_exc()
+                        str(original_exception), _redact_string(traceback.format_exc())
                     ),
                     llm_provider=custom_llm_provider,
                     model=model,
@@ -2460,7 +2469,7 @@ def exception_type(  # type: ignore  # noqa: PLR0915
                     setattr(e, "litellm_response_headers", litellm_response_headers)
                     raise e  # it's already mapped
             raised_exc = APIConnectionError(
-                message="{}\n{}".format(original_exception, traceback.format_exc()),
+                message="{}\n{}".format(original_exception, _redact_string(traceback.format_exc())),
                 llm_provider="",
                 model="",
             )
